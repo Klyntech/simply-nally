@@ -9,6 +9,17 @@ import sys
 from nally.agent import Agent
 from nally.config import validate_config
 
+# Windows cp1252 cannot encode emojis — force UTF-8 with replacement
+try:
+    import sys
+
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
 
 def build_chat_parser() -> argparse.ArgumentParser:
     """Parser for chat mode (default). Supports prompt + --model etc."""
