@@ -99,6 +99,14 @@ def get_system_prompt() -> str:
     return os.getenv("NALLY_SYSTEM_PROMPT", DEFAULT_SYSTEM_PROMPT)
 
 
+# ---------------------------------------------------------------------------
+# Telegram
+# ---------------------------------------------------------------------------
+TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+GOOGLE_DEVICE_CLIENT_ID: str = os.getenv("GOOGLE_DEVICE_CLIENT_ID", "").strip()
+GOOGLE_DEVICE_CLIENT_SECRET: str = os.getenv("GOOGLE_DEVICE_CLIENT_SECRET", "").strip()
+
+
 def validate_config(require_api_key: bool = True) -> list[str]:
     """Return list of error strings; empty means valid."""
     errors: list[str] = []

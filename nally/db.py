@@ -60,7 +60,8 @@ CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 
 CREATE TABLE IF NOT EXISTS users (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    google_id TEXT UNIQUE NOT NULL,
+    google_id TEXT UNIQUE,
+    telegram_id TEXT UNIQUE,
     email TEXT UNIQUE NOT NULL,
     name TEXT,
     picture TEXT,
@@ -99,6 +100,37 @@ CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id);
 """
 
 
+def _migrate_add_telegram(conn) -> None:
+    """Idempotent migration: add telegram_id column and make google_id nullable."""
+    with conn.cursor() as cur:
+        # Add telegram_id column if missing
+        cur.execute(
+            """
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name='users' AND column_name='telegram_id'
+            """
+        )
+        if cur.fetchone() is None:
+            cur.execute("ALTER TABLE users ADD COLUMN telegram_id TEXT")
+            conn.commit()
+        # Make google_id nullable if still NOT NULL
+        cur.execute(
+            """
+            SELECT is_nullable FROM information_schema.columns
+            WHERE table_name='users' AND column_name='google_id'
+            """
+        )
+        row = cur.fetchone()
+        if row is not None and row[0] == "NO":
+            cur.execute("ALTER TABLE users ALTER COLUMN google_id DROP NOT NULL")
+            conn.commit()
+        # Ensure partial unique index for telegram_id
+        cur.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_telegram_id ON users(telegram_id) WHERE telegram_id IS NOT NULL"
+        )
+        conn.commit()
+
+
 def init_schema(conn=None) -> None:
     """Create tables if they do not exist. Safe to call multiple times."""
     close = False
@@ -109,6 +141,8 @@ def init_schema(conn=None) -> None:
         with conn.cursor() as cur:
             cur.execute(SCHEMA_SQL)
         conn.commit()
+        # Run migration for existing DBs (pre-telegram)
+        _migrate_add_telegram(conn)
     finally:
         if close:
             conn.close()
@@ -138,41 +172,171 @@ def upsert_user(
                 name = EXCLUDED.name,
                 picture = EXCLUDED.picture,
                 last_login = NOW()
-            RETURNING id::text, google_id, email, name, picture, created_at, last_login
+            RETURNING id::text, google_id, telegram_id, email, name, picture, created_at, last_login
             """,
             (google_id, email, name, picture),
         )
         row = cur.fetchone()
         conn.commit()
     # psycopg returns tuple; map to dict
-    cols = ["id", "google_id", "email", "name", "picture", "created_at", "last_login"]
+    cols = [
+        "id",
+        "google_id",
+        "telegram_id",
+        "email",
+        "name",
+        "picture",
+        "created_at",
+        "last_login",
+    ]
     return dict(zip(cols, row, strict=False))
 
 
 def get_user_by_google_id(conn, google_id: str) -> dict[str, Any] | None:
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT id::text, google_id, email, name, picture, created_at, last_login FROM users WHERE google_id = %s",
+            "SELECT id::text, google_id, telegram_id, email, name, picture, created_at, last_login FROM users WHERE google_id = %s",
             (google_id,),
         )
         row = cur.fetchone()
         if row is None:
             return None
-        cols = ["id", "google_id", "email", "name", "picture", "created_at", "last_login"]
+        cols = [
+            "id",
+            "google_id",
+            "telegram_id",
+            "email",
+            "name",
+            "picture",
+            "created_at",
+            "last_login",
+        ]
         return dict(zip(cols, row, strict=False))
 
 
 def get_user_by_id(conn, user_id: str) -> dict[str, Any] | None:
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT id::text, google_id, email, name, picture, created_at, last_login FROM users WHERE id = %s",
+            "SELECT id::text, google_id, telegram_id, email, name, picture, created_at, last_login FROM users WHERE id = %s",
             (user_id,),
         )
         row = cur.fetchone()
         if row is None:
             return None
-        cols = ["id", "google_id", "email", "name", "picture", "created_at", "last_login"]
+        cols = [
+            "id",
+            "google_id",
+            "telegram_id",
+            "email",
+            "name",
+            "picture",
+            "created_at",
+            "last_login",
+        ]
         return dict(zip(cols, row, strict=False))
+
+
+def get_user_by_telegram_id(conn, telegram_id: str) -> dict[str, Any] | None:
+    """Lookup user by Telegram ID (string form of the integer)."""
+    tid = str(telegram_id)
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT id::text, google_id, telegram_id, email, name, picture, created_at, last_login FROM users WHERE telegram_id = %s",
+            (tid,),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return None
+        cols = [
+            "id",
+            "google_id",
+            "telegram_id",
+            "email",
+            "name",
+            "picture",
+            "created_at",
+            "last_login",
+        ]
+        return dict(zip(cols, row, strict=False))
+
+
+def link_telegram_to_user(conn, user_id: str, telegram_id: str) -> dict[str, Any]:
+    """Set telegram_id on an existing user. Returns updated user row."""
+    tid = str(telegram_id)
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE users SET telegram_id = %s, last_login = NOW()
+            WHERE id = %s
+            RETURNING id::text, google_id, telegram_id, email, name, picture, created_at, last_login
+            """,
+            (tid, user_id),
+        )
+        row = cur.fetchone()
+        if row is None:
+            conn.rollback()
+            raise ValueError(f"User {user_id} not found")
+        conn.commit()
+    cols = [
+        "id",
+        "google_id",
+        "telegram_id",
+        "email",
+        "name",
+        "picture",
+        "created_at",
+        "last_login",
+    ]
+    return dict(zip(cols, row, strict=False))
+
+
+def unlink_telegram(conn, telegram_id: str) -> bool:
+    """Clear telegram_id from whichever user has it. Returns True if found."""
+    tid = str(telegram_id)
+    with conn.cursor() as cur:
+        cur.execute("UPDATE users SET telegram_id = NULL WHERE telegram_id = %s", (tid,))
+        found = cur.rowcount > 0
+        conn.commit()
+    return bool(found)
+
+
+def create_user_by_telegram(
+    conn,
+    *,
+    telegram_id: str,
+    username: str | None = None,
+    first_name: str | None = None,
+) -> dict[str, Any]:
+    """Create a user keyed only by telegram_id (no Google account)."""
+    tid = str(telegram_id)
+    # Use telegram handle as email placeholder if no Google email
+    email = f"tg_{tid}@telegram.local"
+    name = first_name or username or f"Telegram {tid}"
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO users (telegram_id, email, name, last_login)
+            VALUES (%s, %s, %s, NOW())
+            ON CONFLICT (telegram_id) WHERE telegram_id IS NOT NULL DO UPDATE SET
+                name = EXCLUDED.name,
+                last_login = NOW()
+            RETURNING id::text, google_id, telegram_id, email, name, picture, created_at, last_login
+            """,
+            (tid, email, name),
+        )
+        row = cur.fetchone()
+        conn.commit()
+    cols = [
+        "id",
+        "google_id",
+        "telegram_id",
+        "email",
+        "name",
+        "picture",
+        "created_at",
+        "last_login",
+    ]
+    return dict(zip(cols, row, strict=False))
 
 
 # ---------------------------------------------------------------------------

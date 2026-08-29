@@ -59,6 +59,7 @@ class TestDBHelpers:
         mock_cur.fetchone.return_value = (
             "uuid-1",
             "google-123",
+            None,
             "test@example.com",
             "Test User",
             "https://pic",
@@ -87,6 +88,7 @@ class TestDBHelpers:
         mock_cur.fetchone.return_value = (
             "uuid-1",
             "gid",
+            None,
             "e@x.com",
             "Name",
             None,

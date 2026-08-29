@@ -51,7 +51,7 @@ def build_chat_parser() -> argparse.ArgumentParser:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """Parser for subcommands (auth, history, clear)."""
+    """Parser for subcommands (auth, history, clear, telegram)."""
     p = argparse.ArgumentParser(
         description="Simply NALLY — the smallest reliable agent we can completely understand.",
         prog="main.py",
@@ -71,6 +71,11 @@ def build_parser() -> argparse.ArgumentParser:
     hist_p.add_argument("--json", action="store_true", help="Output as JSON")
     hist_p.add_argument("--limit", type=int, default=20, help="Max messages to show (default 20)")
     sub.add_parser("clear", help="Clear persisted history (keeps system prompt)")
+
+    # ---- telegram ----
+    tg_p = sub.add_parser("telegram", help="Run Telegram bot (polling)")
+    tg_p.add_argument("--token", default=None, help="Override TELEGRAM_BOT_TOKEN")
+    tg_p.add_argument("--drop-pending", action="store_true", help="Drop pending updates on start")
 
     # Also include chat flags so `main.py auth --help` doesn't confuse, and top-level --help lists them
     p.add_argument("--model", default=None, help=argparse.SUPPRESS)
@@ -260,7 +265,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # Dispatch: if first arg is a known subcommand, parse as subcommand; else chat mode.
     # This avoids argparse collision where `hello` is mistaken for a subcommand.
-    if argv and argv[0] in ("auth", "history", "clear"):
+    if argv and argv[0] in ("auth", "history", "clear", "telegram"):
         parser = build_parser()
         args = parser.parse_args(argv)
         if args.command == "auth":
@@ -309,6 +314,44 @@ def main(argv: list[str] | None = None) -> int:
             store.clear(keep_system_prompt=get_system_prompt())
             print(f"Cleared {count} messages. System prompt kept.")
             return 0
+        if args.command == "telegram":
+            # Requires TELEGRAM_BOT_TOKEN + DB (for linking). Does NOT require LLM key at startup (checked inside bot).
+            from nally.config import TELEGRAM_BOT_TOKEN
+
+            token = args.token or TELEGRAM_BOT_TOKEN
+            if not token:
+                print("Config error: TELEGRAM_BOT_TOKEN not set", file=sys.stderr)
+                print("Hint: get a token from @BotFather and set TELEGRAM_BOT_TOKEN in .env", file=sys.stderr)
+                return 2
+            # Ensure DB schema is at least initialized
+            try:
+                from nally import db as db_mod
+
+                if db_mod.is_configured():
+                    conn = db_mod.connect()
+                    try:
+                        db_mod.init_schema(conn)
+                    finally:
+                        conn.close()
+            except Exception as exc:
+                print(f"Warning: could not init DB schema: {exc}", file=sys.stderr)
+            # LLM key is needed for chatting — validate now
+            errs = validate_config(require_api_key=True)
+            if errs:
+                for e in errs:
+                    print(f"Config error: {e}", file=sys.stderr)
+                return 2
+            try:
+                from nally.telegram.bot import run_bot
+
+                run_bot(token=token, drop_pending_updates=bool(args.drop_pending))
+                return 0
+            except RuntimeError as exc:
+                print(f"Telegram bot error: {exc}", file=sys.stderr)
+                return 1
+            except KeyboardInterrupt:
+                print("\nTelegram bot stopped.")
+                return 0
         # Fallback (should not happen)
         parser.print_help()
         return 2
@@ -322,6 +365,7 @@ def main(argv: list[str] | None = None) -> int:
         print("  auth login|logout|status|init-db   Google OAuth + NEON")
         print("  history [--json] [--limit N]        Show persisted history")
         print("  clear                               Clear persisted history")
+        print("  telegram [--token TOKEN]            Run Telegram bot (polling)")
         return 0
 
     chat_parser = build_chat_parser()
