@@ -61,7 +61,7 @@ _EXPLICIT_MODEL = os.getenv("NALLY_MODEL", "") or os.getenv("MODEL", "")
 _PROVIDER_DEFAULT_MODEL = {
     "openai": "gpt-4o-mini",
     "groq": "llama-3.3-70b-versatile",
-    "opencode": "muse-spark-1.2-contributor-free",
+    "opencode": "hy3-free",
 }
 
 MODEL: str = _EXPLICIT_MODEL or _PROVIDER_DEFAULT_MODEL.get(PROVIDER, "gpt-4o-mini")
