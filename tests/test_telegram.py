@@ -679,6 +679,7 @@ class TestTelegramUx:
         bot.edit_message_text = AsyncMock()
         loop = MagicMock()
         updater = StatusUpdater(bot=bot, chat_id=1, message_id=1, loop=loop)
+
         # Patch run_coroutine_threadsafe to avoid needing real loop, close coroutine to suppress warning
         def _close(coro, _loop):
             with contextlib.suppress(Exception):
@@ -818,14 +819,20 @@ class TestTelegramFormat:
     def test_links_and_headings(self):
         from nally.telegram.bot import telegram_format
 
-        assert telegram_format("[Google](https://google.com)") == '<a href="https://google.com">Google</a>'
+        assert (
+            telegram_format("[Google](https://google.com)")
+            == '<a href="https://google.com">Google</a>'
+        )
         assert telegram_format("### Heading") == "<b>Heading</b>"
         assert telegram_format("~~strike~~") == "<s>strike</s>"
 
     def test_mixed_and_escaping(self):
         from nally.telegram.bot import telegram_format
 
-        assert telegram_format("mix **bold** and *italic* and `code`") == "mix <b>bold</b> and <i>italic</i> and <code>code</code>"
+        assert (
+            telegram_format("mix **bold** and *italic* and `code`")
+            == "mix <b>bold</b> and <i>italic</i> and <code>code</code>"
+        )
         assert telegram_format("a & b < c > d") == "a &amp; b &lt; c &gt; d"
         # HTML in code should be escaped, outside escaped too
         assert telegram_format("`<b>`") == "<code>&lt;b&gt;</code>"
@@ -872,3 +879,143 @@ class TestTelegramFormat:
                         kwargs = context.bot.edit_message_text.call_args[1]
                         assert kwargs.get("parse_mode") == "HTML"
                         assert "<b>8</b>" in kwargs.get("text")
+
+
+# ------------------------------------------------------------------ MCP
+class TestMCPCommand:
+    @pytest.mark.asyncio
+    async def test_handle_mcp_not_linked(self):
+        from nally.telegram.bot import handle_mcp
+
+        update = MagicMock()
+        update.effective_user.id = 12345
+        update.effective_chat.id = 1
+        update.message.reply_text = AsyncMock()
+        context = MagicMock()
+        with patch("nally.db.is_configured", return_value=True):
+            with patch("nally.db.connect") as mock_connect:
+                mock_conn = MagicMock()
+                mock_connect.return_value = mock_conn
+                with patch("nally.db.get_user_by_telegram_id", return_value=None):
+                    await handle_mcp(update, context)
+                    assert update.message.reply_text.called
+                    assert "Not linked" in update.message.reply_text.call_args[0][0]
+
+    @pytest.mark.asyncio
+    async def test_handle_mcp_linked(self):
+        from nally.telegram.bot import handle_mcp
+
+        update = MagicMock()
+        update.effective_user.id = 12345
+        update.effective_chat.id = 1
+        update.message.reply_text = AsyncMock()
+        context = MagicMock()
+        fake_user = {
+            "id": "uid1",
+            "google_id": "gid1",
+            "telegram_id": "12345",
+            "email": "x@x.com",
+        }
+        with patch("nally.db.is_configured", return_value=True):
+            with patch("nally.db.connect") as mock_connect:
+                mock_conn = MagicMock()
+                mock_connect.return_value = mock_conn
+                with patch("nally.db.get_user_by_telegram_id", return_value=fake_user):
+                    await handle_mcp(update, context)
+                    assert update.message.reply_text.called
+                    call_args = update.message.reply_text.call_args
+                    text = call_args[0][0]
+                    assert "MCP enabled" in text
+                    kwargs = call_args[1]
+                    assert kwargs.get("reply_markup") is not None
+
+
+class TestMCPCallback:
+    @pytest.mark.asyncio
+    async def test_handle_callback_disconnect(self):
+        from nally.telegram.bot import handle_callback
+
+        update = MagicMock()
+        query = MagicMock()
+        query.data = "mcp_github_disconnect"
+        query.answer = AsyncMock()
+        query.edit_message_text = AsyncMock()
+        update.callback_query = query
+        context = MagicMock()
+        with patch("nally.github_oauth.clear_github_token", return_value=True):
+            with patch("nally.telegram.bot._build_mcp_keyboard", return_value="kb"):
+                with patch("nally.telegram.bot._mcp_status_text", return_value="text"):
+                    await handle_callback(update, context)
+                    assert query.answer.called
+                    query.edit_message_text.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_handle_callback_connect_no_config(self):
+        from nally.telegram.bot import handle_callback
+
+        update = MagicMock()
+        query = MagicMock()
+        query.data = "mcp_github_connect"
+        query.answer = AsyncMock()
+        query.edit_message_text = AsyncMock()
+        update.callback_query = query
+        context = MagicMock()
+        with patch("os.getenv", return_value=""):
+            await handle_callback(update, context)
+            assert query.answer.called
+            query.edit_message_text.assert_called_once()
+            assert "not configured" in query.edit_message_text.call_args[0][0]
+
+
+class TestGitHubOAuth:
+    def test_is_github_authenticated_with_pat(self):
+        from nally.github_oauth import is_github_authenticated
+
+        with patch("os.getenv", return_value="ghp_test123"):
+            assert is_github_authenticated() is True
+
+    def test_is_github_authenticated_with_cached_token(self):
+        from nally.github_oauth import is_github_authenticated
+
+        with patch("os.getenv", return_value=""):
+            with patch("nally.github_oauth.get_cached_token", return_value="cached_token"):
+                assert is_github_authenticated() is True
+
+    def test_is_github_authenticated_not_auth(self):
+        from nally.github_oauth import is_github_authenticated
+
+        with patch("os.getenv", return_value=""):
+            with patch("nally.github_oauth.get_cached_token", return_value=None):
+                assert is_github_authenticated() is False
+
+    def test_clear_github_token(self):
+        from nally.github_oauth import TOKEN_CACHE_FILE, clear_github_token
+
+        with patch("os.path.exists", return_value=True):
+            with patch("os.remove") as mock_remove:
+                assert clear_github_token() is True
+                mock_remove.assert_called_once_with(TOKEN_CACHE_FILE)
+
+    def test_clear_github_token_no_file(self):
+        from nally.github_oauth import clear_github_token
+
+        with patch("os.path.exists", return_value=False):
+            assert clear_github_token() is False
+
+    def test_github_request_device_code(self):
+        from nally.github_oauth import github_request_device_code
+
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "device_code": "dc123",
+            "user_code": "ABCD-EFGH",
+            "verification_uri": "https://github.com/login/device",
+            "expires_in": 900,
+            "interval": 5,
+        }
+        mock_resp.raise_for_status = MagicMock()
+        with patch("os.getenv", side_effect=lambda k, d="": "test_id" if "CLIENT_ID" in k else "test_secret" if "CLIENT_SECRET" in k else d):
+            with patch("requests.post", return_value=mock_resp):
+                data = github_request_device_code()
+                assert data["device_code"] == "dc123"
+                assert data["user_code"] == "ABCD-EFGH"

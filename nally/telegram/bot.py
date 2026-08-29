@@ -194,6 +194,7 @@ async def handle_start(update, context) -> None:
         "• /link — link your Telegram to Google (shared CLI history)\n"
         "• /unlink — remove the link\n"
         "• /status — show link + session info\n"
+        "• /mcp — show MCP status + GitHub auth\n"
         "• /clear — clear history\n"
         "• /help — this message\n"
     )
@@ -482,6 +483,219 @@ async def handle_link(update, context) -> None:
         pass
 
 
+# ------------------------------------------------------------------ MCP
+def _build_mcp_keyboard():
+    """Build inline keyboard for /mcp command."""
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+    try:
+        from nally.github_oauth import is_github_authenticated
+
+        gh_auth = is_github_authenticated()
+    except Exception:
+        gh_auth = False
+
+    if gh_auth:
+        btn = InlineKeyboardButton(
+            "GitHub: Authenticated", callback_data="mcp_github_disconnect"
+        )
+    else:
+        btn = InlineKeyboardButton(
+            "GitHub: Not Authenticated", callback_data="mcp_github_connect"
+        )
+    return InlineKeyboardMarkup([[btn]])
+
+
+def _mcp_status_text() -> str:
+    """Build the status text for /mcp."""
+    lines: list[str] = []
+
+    # MCP enabled
+    from nally.config import MCP_ENABLED
+
+    lines.append(f"MCP enabled: {MCP_ENABLED}")
+
+    # mcp package
+    try:
+        from nally.tools.mcp.adapter import _has_mcp
+
+        lines.append(f"mcp package: {'installed' if _has_mcp() else 'not installed'}")
+    except Exception:
+        lines.append("mcp package: unavailable")
+
+    # GitHub auth
+    try:
+        from nally.github_oauth import is_github_authenticated
+
+        lines.append(f"GitHub auth: {'yes' if is_github_authenticated() else 'no'}")
+    except Exception:
+        lines.append("GitHub auth: unknown")
+
+    return "\n".join(lines)
+
+
+async def handle_mcp(update, context) -> None:
+    telegram_id = str(update.effective_user.id) if update.effective_user else None
+    if not telegram_id:
+        await update.message.reply_text("Cannot determine your Telegram ID.")
+        return
+
+    # Only linked users
+    try:
+        from nally import db
+
+        if db.is_configured():
+            conn = db.connect()
+            try:
+                user = db.get_user_by_telegram_id(conn, telegram_id)
+                if user is None:
+                    await update.message.reply_text(
+                        "Not linked — send /link to connect your Telegram to Google first."
+                    )
+                    return
+            finally:
+                conn.close()
+    except Exception:
+        pass
+
+    text = _mcp_status_text()
+    kb = _build_mcp_keyboard()
+    await update.message.reply_text(text, reply_markup=kb, parse_mode="HTML")
+
+
+async def handle_callback(update, context) -> None:
+    query = update.callback_query
+    if query is None or query.data is None:
+        return
+    await query.answer()
+
+    data = query.data
+    if data == "mcp_github_connect":
+        await _callback_mcp_connect(query, context)
+    elif data == "mcp_github_disconnect":
+        await _callback_mcp_disconnect(query)
+
+
+async def _callback_mcp_connect(query, context) -> None:
+    """Start GitHub OAuth device flow from inline button."""
+    # Check config first
+    import os
+
+    cid = os.getenv("GITHUB_CLIENT_ID", "").strip()
+    csec = os.getenv("GITHUB_CLIENT_SECRET", "").strip()
+    if not cid or not csec:
+        with contextlib.suppress(Exception):
+            await query.edit_message_text(
+                "GitHub OAuth not configured. Set GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET."
+            )
+        return
+
+    # Check mcp package
+    try:
+        from nally.tools.mcp.adapter import _has_mcp
+
+        if not _has_mcp():
+            with contextlib.suppress(Exception):
+                await query.edit_message_text(
+                    "mcp package not installed. Run: pip install mcp"
+                )
+            return
+    except Exception:
+        pass
+
+    # Request device code
+    try:
+        from nally.github_oauth import github_request_device_code
+
+        data = github_request_device_code()
+    except Exception as exc:
+        with contextlib.suppress(Exception):
+            await query.edit_message_text(f"Could not start GitHub auth: {exc}")
+        return
+
+    user_code = data["user_code"]
+    verification_uri = data.get("verification_uri", "https://github.com/login/device")
+    expires_in = data.get("expires_in", 900)
+    interval = data.get("interval", 5)
+    device_code = data["device_code"]
+
+    # Show instructions
+    try:
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+        kb = InlineKeyboardMarkup(
+            [[InlineKeyboardButton("Open GitHub", url=verification_uri)]]
+        )
+        status_msg = await query.edit_message_text(
+            f"GitHub OAuth: visit {verification_uri} and enter code: <code>{html.escape(user_code)}</code>\n\n"
+            f"Code expires in {expires_in // 60} min. I'll check automatically…",
+            parse_mode="HTML",
+            reply_markup=kb,
+        )
+    except Exception:
+        status_msg = None
+
+    # Background poll
+    async def _poll_and_update():
+        try:
+            from nally.github_oauth import github_poll_token
+
+            def _poll():
+                return github_poll_token(
+                    device_code=device_code,
+                    expires_in=expires_in,
+                    interval=interval,
+                )
+
+            await asyncio.to_thread(_poll)
+            # Update to authenticated
+            try:
+                kb2 = _build_mcp_keyboard()
+                text2 = _mcp_status_text()
+                if status_msg is not None:
+                    await status_msg.edit_text(text2, reply_markup=kb2)
+            except Exception:
+                pass
+        except Exception as exc:
+            try:
+                if status_msg is not None:
+                    await status_msg.edit_text(f"GitHub auth failed: {exc}")
+            except Exception:
+                pass
+
+    _task = asyncio.create_task(_poll_and_update())
+    try:
+        context.bot_data.setdefault("_mcp_tasks", []).append(_task)
+        _task.add_done_callback(
+            lambda t: (
+                context.bot_data["_mcp_tasks"].remove(t)
+                if t in context.bot_data.get("_mcp_tasks", [])
+                else None
+            )
+        )
+    except Exception:
+        pass
+
+
+async def _callback_mcp_disconnect(query) -> None:
+    """Clear GitHub device-flow token."""
+    try:
+        from nally.github_oauth import clear_github_token
+
+        cleared = clear_github_token()
+        if cleared:
+            kb = _build_mcp_keyboard()
+            text = _mcp_status_text()
+            with contextlib.suppress(Exception):
+                await query.edit_message_text(text, reply_markup=kb)
+        else:
+            with contextlib.suppress(Exception):
+                await query.answer("No cached token to clear.")
+    except Exception as exc:
+        with contextlib.suppress(Exception):
+            await query.answer(f"Disconnect failed: {exc}")
+
+
 async def handle_message(update, context) -> None:
     if not update.message or not update.message.text:
         return
@@ -582,7 +796,10 @@ async def handle_message(update, context) -> None:
                         await placeholder.edit_text(plain_chunks[0])
                     if not plain_chunks:
                         with contextlib.suppress(Exception):
-                            await context.bot.send_message(chat_id=chat_id, text=plain_chunks[0] if plain_chunks else reply[:4000])
+                            await context.bot.send_message(
+                                chat_id=chat_id,
+                                text=plain_chunks[0] if plain_chunks else reply[:4000],
+                            )
             else:
                 try:
                     await placeholder.edit_text(chunks[0], parse_mode="HTML")
@@ -647,7 +864,13 @@ def run_bot(token: str | None = None, *, drop_pending_updates: bool = False) -> 
     if not tok:
         raise RuntimeError("TELEGRAM_BOT_TOKEN not set. Get it from @BotFather and set in .env")
     try:
-        from telegram.ext import Application, CommandHandler, MessageHandler, filters
+        from telegram.ext import (
+            Application,
+            CallbackQueryHandler,
+            CommandHandler,
+            MessageHandler,
+            filters,
+        )
     except ImportError as exc:
         raise RuntimeError(
             "python-telegram-bot not installed. Run: pip install python-telegram-bot"
@@ -660,6 +883,8 @@ def run_bot(token: str | None = None, *, drop_pending_updates: bool = False) -> 
     app.add_handler(CommandHandler("unlink", handle_unlink))
     app.add_handler(CommandHandler("status", handle_status))
     app.add_handler(CommandHandler("clear", handle_clear))
+    app.add_handler(CommandHandler("mcp", handle_mcp))
+    app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     # Also handle /clear etc as plain text "/clear" (some clients)
