@@ -19,6 +19,7 @@ except ImportError:
 # ---------------------------------------------------------------------------
 PROVIDER: str = os.getenv("NALLY_PROVIDER", "openai").strip().lower()
 
+
 # API key: provider-specific first, then generic fallback
 # Opencode supports comma-separated keys (rotation) — we use the first for now
 def _first_key(env_name: str) -> str:

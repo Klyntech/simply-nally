@@ -13,8 +13,10 @@ from typing import Any
 from .config import MAX_ITERATIONS, MAX_TOOL_CALLS, get_system_prompt
 from .llm import LLMClient, LLMError, default_client
 from .tools.base import ToolRegistry
+from .tools.fetch import register_fetch_tools
 from .tools.filesystem import register_filesystem_tools
 from .tools.shell import register_shell_tools
+from .tools.websearch import register_web_tools
 
 
 def build_default_registry(max_output: int = 8000) -> ToolRegistry:
@@ -22,6 +24,8 @@ def build_default_registry(max_output: int = 8000) -> ToolRegistry:
     registry = ToolRegistry(max_output=max_output)
     register_filesystem_tools(registry)
     register_shell_tools(registry)
+    register_web_tools(registry)
+    register_fetch_tools(registry)
     return registry
 
 
