@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import html
 import logging
+import re
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -40,6 +42,78 @@ def split_message(text: str, max_len: int = TELEGRAM_MAX_LEN) -> list[str]:
         if not remaining and not chunks[-1].strip():
             break
     return chunks
+
+
+def telegram_format(text: str) -> str:
+    """Convert LLM markdown to Telegram HTML.
+
+    Handles:
+      ```lang\\ncode``` -> <pre>code</pre>
+      `inline` -> <code>inline</code>
+      **bold** / __bold__ -> <b>bold</b>
+      *italic* / _italic_ -> <i>italic</i>
+      ~~strike~~ -> <s>strike</s>
+      [text](url) -> <a href="url">text</a>
+      ### heading -> <b>heading</b>
+    Code blocks are protected and HTML-escaped.
+    """
+    if not text:
+        return text
+
+    blocks: dict[str, str] = {}
+    inlines: dict[str, str] = {}
+
+    def _save_block(m: re.Match[str]) -> str:
+        key = f"\x00TG_BLOCK_{len(blocks)}\x00"
+        code = m.group(1) or ""
+        # Strip trailing newline for cleaner <pre>
+        if code.endswith("\n"):
+            code = code[:-1]
+        escaped = html.escape(code, quote=False)
+        blocks[key] = f"<pre>{escaped}</pre>"
+        return key
+
+    def _save_inline(m: re.Match[str]) -> str:
+        key = f"\x00TG_INLINE_{len(inlines)}\x00"
+        code = m.group(1) or ""
+        escaped = html.escape(code, quote=False)
+        inlines[key] = f"<code>{escaped}</code>"
+        return key
+
+    # Protect code blocks and inline code first
+    # Handle ```lang\ncode``` and ```code``` (lang only with newline)
+    text = re.sub(r"```(?:\w*\n)?(.*?)```", _save_block, text, flags=re.DOTALL)
+    text = re.sub(r"`([^`\n]+?)`", _save_inline, text)
+
+    # Escape remaining HTML (& < >)
+    text = html.escape(text, quote=False)
+
+    # Bold: **text** and __text__
+    text = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text)
+    text = re.sub(r"__(.+?)__", r"<b>\1</b>", text)
+
+    # Italic: *text* (single, not double) and _text_ (word boundaries)
+    # After bold, remaining * are single
+    text = re.sub(r"(?<!\*)\*([^*]+?)\*(?!\*)", r"<i>\1</i>", text)
+    text = re.sub(r"(?<!\w)_([^_\n]+?)_(?!\w)", r"<i>\1</i>", text)
+
+    # Strikethrough
+    text = re.sub(r"~~(.+?)~~", r"<s>\1</s>", text)
+
+    # Links: [text](url) -> <a>
+    # url may contain &amp; from escaping; keep as is (Telegram handles it)
+    text = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r'<a href="\2">\1</a>', text)
+
+    # Headings: ### text -> <b>text</b>
+    text = re.sub(r"(?m)^#{1,6}\s+(.+)$", r"<b>\1</b>", text)
+
+    # Restore code
+    for key, val in inlines.items():
+        text = text.replace(key, val)
+    for key, val in blocks.items():
+        text = text.replace(key, val)
+
+    return text
 
 
 async def typing_loop(bot, chat_id: int, stop_event: asyncio.Event) -> None:
@@ -114,7 +188,7 @@ def _clear_agent(chat_id: int) -> None:
 # ------------------------------------------------------------------ Handlers
 async def handle_start(update, context) -> None:
     text = (
-        "Hello! I'm *Nally* — your Simply NALLY assistant.\n\n"
+        "Hello! I'm <i>Nally</i> — your Simply NALLY assistant.\n\n"
         "Send any message to chat. I'm powered by your shared NEON session.\n\n"
         "Commands:\n"
         "• /link — link your Telegram to Google (shared CLI history)\n"
@@ -123,7 +197,7 @@ async def handle_start(update, context) -> None:
         "• /clear — clear history\n"
         "• /help — this message\n"
     )
-    await update.message.reply_text(text, parse_mode="Markdown")
+    await update.message.reply_text(text, parse_mode="HTML")
 
 
 async def handle_help(update, context) -> None:
@@ -315,12 +389,12 @@ async def handle_link(update, context) -> None:
     instructions = (
         f"To link your Telegram to Google:\n\n"
         f"1. Go to: {verification_url}\n"
-        f"2. Enter code: *{user_code}*\n\n"
+        f"2. Enter code: <code>{html.escape(user_code)}</code>\n\n"
         f"Code expires in {expires_in // 60} min. I'll check automatically…"
     )
     try:
         status_msg = await update.message.reply_text(
-            instructions, parse_mode="Markdown", reply_markup=keyboard
+            instructions, parse_mode="HTML", reply_markup=keyboard
         )
     except Exception:
         status_msg = await update.message.reply_text(
@@ -361,8 +435,8 @@ async def handle_link(update, context) -> None:
             _clear_agent(chat_id)
             try:
                 await status_msg.edit_text(
-                    f"Linked as *{user.get('email', '')}* — same session as CLI. Try sending a message!",
-                    parse_mode="Markdown",
+                    f"Linked as <b>{html.escape(user.get('email', '') or '')}</b> — same session as CLI. Try sending a message!",
+                    parse_mode="HTML",
                 )
             except Exception:
                 await context.bot.send_message(
@@ -491,26 +565,46 @@ async def handle_message(update, context) -> None:
             with contextlib.suppress(Exception):
                 agent.on_tool_start = prev_on_tool  # type: ignore[method-assign]
 
-        chunks = split_message(reply)
+        # Convert LLM markdown to Telegram HTML, then split (ensures HTML stays <4096)
+        formatted = telegram_format(reply)
+        chunks = split_message(formatted)
+        # Fallback plain chunks if HTML fails
+        plain_chunks = split_message(reply)
+
         # Edit single status message with final answer, send rest as new messages
         if placeholder is not None:
             if updater is not None:
                 try:
-                    await updater.finish(chunks[0])
+                    await updater.finish(chunks[0], parse_mode="HTML")
                 except Exception:
+                    # HTML failed — fallback to plain
                     with contextlib.suppress(Exception):
-                        await placeholder.edit_text(chunks[0])
+                        await placeholder.edit_text(plain_chunks[0])
+                    if not plain_chunks:
+                        with contextlib.suppress(Exception):
+                            await context.bot.send_message(chat_id=chat_id, text=plain_chunks[0] if plain_chunks else reply[:4000])
             else:
                 try:
-                    await placeholder.edit_text(chunks[0])
+                    await placeholder.edit_text(chunks[0], parse_mode="HTML")
                 except Exception:
-                    await context.bot.send_message(chat_id=chat_id, text=chunks[0])
-            for chunk in chunks[1:]:
+                    try:
+                        await placeholder.edit_text(plain_chunks[0])
+                    except Exception:
+                        await context.bot.send_message(chat_id=chat_id, text=plain_chunks[0])
+            for idx, chunk in enumerate(chunks[1:]):
                 await asyncio.sleep(0.6)
-                await context.bot.send_message(chat_id=chat_id, text=chunk)
+                try:
+                    await context.bot.send_message(chat_id=chat_id, text=chunk, parse_mode="HTML")
+                except Exception:
+                    fallback = plain_chunks[idx + 1] if idx + 1 < len(plain_chunks) else chunk
+                    await context.bot.send_message(chat_id=chat_id, text=fallback)
         else:
-            for chunk in chunks:
-                await context.bot.send_message(chat_id=chat_id, text=chunk)
+            for idx, chunk in enumerate(chunks):
+                try:
+                    await context.bot.send_message(chat_id=chat_id, text=chunk, parse_mode="HTML")
+                except Exception:
+                    fallback = plain_chunks[idx] if idx < len(plain_chunks) else chunk
+                    await context.bot.send_message(chat_id=chat_id, text=fallback)
                 await asyncio.sleep(0.3)
     except Exception as exc:
         # Restore callback on error too
@@ -521,7 +615,7 @@ async def handle_message(update, context) -> None:
         if placeholder is not None:
             if updater is not None:
                 with contextlib.suppress(Exception):
-                    await updater.finish(err[:4000])
+                    await updater.finish(err[:4000], parse_mode=None)
                     err = ""  # already sent via edit
             if err:
                 try:

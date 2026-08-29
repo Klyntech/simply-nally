@@ -60,19 +60,33 @@ class StatusUpdater:
             asyncio.run_coroutine_threadsafe(self._edit(text), self._loop)
 
     # --- async helpers (called from event loop) -------------------------
-    async def _edit(self, text: str) -> None:
-        with contextlib.suppress(Exception):
-            await self.bot.edit_message_text(
-                chat_id=self.chat_id,
-                message_id=self.message_id,
-                text=text,
-            )
+    async def _edit(self, text: str, parse_mode: str | None = None) -> None:
+        try:
+            kwargs: dict[str, object] = {
+                "chat_id": self.chat_id,
+                "message_id": self.message_id,
+                "text": text,
+            }
+            if parse_mode:
+                kwargs["parse_mode"] = parse_mode  # type: ignore[assignment]
+            await self.bot.edit_message_text(**kwargs)  # type: ignore[arg-type]
+        except Exception:
+            # Fallback: try plain text if HTML failed (bad formatting)
+            if parse_mode:
+                with contextlib.suppress(Exception):
+                    await self.bot.edit_message_text(
+                        chat_id=self.chat_id,
+                        message_id=self.message_id,
+                        text=text,
+                    )
+            else:
+                raise
 
     async def update(self, text: str) -> None:
         """Async update from handler (no rate-limit, direct)."""
         self._last_edit = time.monotonic()
         await self._edit(text)
 
-    async def finish(self, text: str) -> None:
+    async def finish(self, text: str, parse_mode: str | None = "HTML") -> None:
         """Replace status message with final answer."""
-        await self._edit(text)
+        await self._edit(text, parse_mode=parse_mode)

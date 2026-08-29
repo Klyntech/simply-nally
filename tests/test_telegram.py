@@ -374,8 +374,11 @@ class TestBotHandlers:
         await handle_start(update, context)
         assert update.message.reply_text.called
         text = update.message.reply_text.call_args[0][0]
+        kwargs = update.message.reply_text.call_args[1]
         assert "Nally" in text
         assert "/link" in text
+        assert kwargs.get("parse_mode") == "HTML"
+        assert "<i>Nally</i>" in text
 
     @pytest.mark.asyncio
     async def test_handle_status_not_linked(self):
@@ -773,3 +776,99 @@ class TestTelegramUx:
         result = agent.run("hello")
         assert result == "done"
         assert calls == ["list_dir"]
+
+
+# ------------------------------------------------------------------ telegram format (markdown -> HTML)
+class TestTelegramFormat:
+    def test_bold_8(self):
+        from nally.telegram.bot import telegram_format
+
+        assert telegram_format("The answer is **8**") == "The answer is <b>8</b>"
+        assert telegram_format("**8** is bold") == "<b>8</b> is bold"
+
+    def test_bold_variants(self):
+        from nally.telegram.bot import telegram_format
+
+        assert telegram_format("**bold**") == "<b>bold</b>"
+        assert telegram_format("__bold__") == "<b>bold</b>"
+        assert telegram_format("a **bold** b") == "a <b>bold</b> b"
+
+    def test_italic_variants(self):
+        from nally.telegram.bot import telegram_format
+
+        assert telegram_format("*italic*") == "<i>italic</i>"
+        assert telegram_format("_italic_") == "<i>italic</i>"
+        assert telegram_format("a *italic* b") == "a <i>italic</i> b"
+
+    def test_code_inline(self):
+        from nally.telegram.bot import telegram_format
+
+        assert telegram_format("`code`") == "<code>code</code>"
+        assert telegram_format("a `code` b") == "a <code>code</code> b"
+        # code with ** inside should not be bolded
+        assert telegram_format("`code **bold** inside`") == "<code>code **bold** inside</code>"
+
+    def test_code_block(self):
+        from nally.telegram.bot import telegram_format
+
+        assert telegram_format("```python\nprint(1)\n```") == "<pre>print(1)</pre>"
+        assert telegram_format("```code **bold**```") == "<pre>code **bold**</pre>"
+        assert telegram_format("a ```code``` b") == "a <pre>code</pre> b"
+
+    def test_links_and_headings(self):
+        from nally.telegram.bot import telegram_format
+
+        assert telegram_format("[Google](https://google.com)") == '<a href="https://google.com">Google</a>'
+        assert telegram_format("### Heading") == "<b>Heading</b>"
+        assert telegram_format("~~strike~~") == "<s>strike</s>"
+
+    def test_mixed_and_escaping(self):
+        from nally.telegram.bot import telegram_format
+
+        assert telegram_format("mix **bold** and *italic* and `code`") == "mix <b>bold</b> and <i>italic</i> and <code>code</code>"
+        assert telegram_format("a & b < c > d") == "a &amp; b &lt; c &gt; d"
+        # HTML in code should be escaped, outside escaped too
+        assert telegram_format("`<b>`") == "<code>&lt;b&gt;</code>"
+        assert telegram_format("a <b>already</b>") == "a &lt;b&gt;already&lt;/b&gt;"
+
+    def test_no_markdown_passthrough(self):
+        from nally.telegram.bot import telegram_format
+
+        assert telegram_format("no markdown plain") == "no markdown plain"
+        assert telegram_format("") == ""
+        assert telegram_format("plain & < >") == "plain &amp; &lt; &gt;"
+
+    @pytest.mark.asyncio
+    async def test_handle_message_uses_html(self):
+        from nally.telegram.bot import handle_message
+
+        update = MagicMock()
+        update.message.text = "hi"
+        update.message.reply_text = AsyncMock()
+        placeholder = AsyncMock()
+        placeholder.message_id = 123
+        placeholder.edit_text = AsyncMock()
+        update.message.reply_text.return_value = placeholder
+        update.effective_user.id = 777
+        update.effective_chat.id = 1
+        context = MagicMock()
+        context._nally_locks = {}
+        context.bot.send_chat_action = AsyncMock()
+        context.bot.send_message = AsyncMock()
+        context.bot.edit_message_text = AsyncMock()
+
+        fake_user = {"id": "uid1", "google_id": "gid1", "telegram_id": "777", "email": "e@x.com"}
+        fake_agent = MagicMock()
+        fake_agent.run.return_value = "answer **8** bold"
+        fake_agent.on_tool_start = None
+
+        with patch("nally.db.is_configured", return_value=True):
+            with patch("nally.db.get_user_by_telegram_id", return_value=fake_user):
+                with patch("nally.db.connect", return_value=MagicMock()):
+                    with patch("nally.telegram.bot._get_or_create_agent", return_value=fake_agent):
+                        await handle_message(update, context)
+                        # Should be sent with HTML and formatted
+                        assert context.bot.edit_message_text.called
+                        kwargs = context.bot.edit_message_text.call_args[1]
+                        assert kwargs.get("parse_mode") == "HTML"
+                        assert "<b>8</b>" in kwargs.get("text")
