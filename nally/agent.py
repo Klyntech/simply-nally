@@ -21,14 +21,33 @@ from .tools.think import register_think_tools
 from .tools.websearch import register_web_tools
 
 
-def build_default_registry(max_output: int = 8000) -> ToolRegistry:
-    """Create a registry with all v0.1 tools."""
+def build_default_registry(
+    max_output: int = 8000,
+    mcp_config: dict | None = None,
+    load_mcp: bool = True,
+) -> ToolRegistry:
+    """Create a registry with all v0.1 tools (+ MCP GitHub when enabled)."""
     registry = ToolRegistry(max_output=max_output)
     register_filesystem_tools(registry)
     register_shell_tools(registry)
     register_web_tools(registry)
     register_fetch_tools(registry)
     register_think_tools(registry)
+    if load_mcp:
+        try:
+            from .config import MCP_ENABLED, get_mcp_servers_config
+
+            if MCP_ENABLED:
+                cfg = mcp_config if mcp_config is not None else get_mcp_servers_config()
+                if cfg:
+                    try:
+                        from .tools.mcp.adapter import load_mcp_tools_sync
+
+                        load_mcp_tools_sync(registry, config=cfg)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
     return registry
 
 
@@ -174,10 +193,36 @@ class Agent:
             # No tools requested -> final response
             if not tool_calls:
                 content = msg.content or ""
-                # Handle empty response
+                # Handle empty response — retry once before giving up
                 if not content.strip():
-                    content = "(no response from model)"
-                final_msg: dict[str, Any] = {"role": "assistant", "content": content}
+                    self.messages.append(
+                        {"role": "user", "content": "(You must respond to the user.)"}
+                    )
+                    try:
+                        response = self.llm.chat(
+                            messages=self.messages,
+                            tools=self.registry.all_schemas() or None,
+                        )
+                        choice = response.choices[0]
+                        msg = choice.message
+                        tool_calls = getattr(msg, "tool_calls", None)
+                        if not tool_calls:
+                            content = msg.content or ""
+                            if not content.strip():
+                                content = "I'm having trouble generating a response. Try again with a shorter request."
+                            final_msg: dict[str, Any] = {"role": "assistant", "content": content}
+                            self.messages.append(final_msg)
+                            self._persist(final_msg, response=response)
+                            return content
+                        # Retry returned tool_calls — fall through to tool processing below
+                    except Exception:
+                        content = "I'm having trouble generating a response. Try again with a shorter request."
+                        final_msg = {"role": "assistant", "content": content}
+                        self.messages.append(final_msg)
+                        self._persist(final_msg)
+                        return content
+
+                final_msg = {"role": "assistant", "content": content}
                 self.messages.append(final_msg)
                 self._persist(final_msg, response=response)
                 return content
