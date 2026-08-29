@@ -20,14 +20,27 @@ except ImportError:
 PROVIDER: str = os.getenv("NALLY_PROVIDER", "openai").strip().lower()
 
 # API key: provider-specific first, then generic fallback
+# Opencode supports comma-separated keys (rotation) — we use the first for now
+def _first_key(env_name: str) -> str:
+    raw = os.getenv(env_name, "").strip()
+    if "," in raw:
+        # Take first non-empty key (mirrors old N.A.L.L.Y rotation logic)
+        for part in raw.split(","):
+            part = part.strip()
+            if part:
+                return part
+        return ""
+    return raw
+
+
 _API_KEY_MAP = {
-    "openai": os.getenv("OPENAI_API_KEY", ""),
-    "groq": os.getenv("GROQ_API_KEY", ""),
-    "opencode": os.getenv("OPENCODE_API_KEY", ""),
+    "openai": _first_key("OPENAI_API_KEY"),
+    "groq": _first_key("GROQ_API_KEY"),
+    "opencode": _first_key("OPENCODE_API_KEY"),
 }
 
 # Allow OPENAI_API_KEY as generic fallback for any provider
-GENERIC_API_KEY = os.getenv("OPENAI_API_KEY", "") or os.getenv("API_KEY", "")
+GENERIC_API_KEY = _first_key("OPENAI_API_KEY") or _first_key("API_KEY")
 
 API_KEY: str = _API_KEY_MAP.get(PROVIDER, "") or GENERIC_API_KEY
 
@@ -37,7 +50,7 @@ _EXPLICIT_BASE_URL = os.getenv("OPENAI_BASE_URL", "") or os.getenv("BASE_URL", "
 _PROVIDER_BASE_URL = {
     "openai": "https://api.openai.com/v1",
     "groq": "https://api.groq.com/openai/v1",
-    "opencode": "https://api.opencode.ai/v1",
+    "opencode": "https://opencode.ai/zen/v1",
 }
 
 BASE_URL: str = _EXPLICIT_BASE_URL or _PROVIDER_BASE_URL.get(PROVIDER, "https://api.openai.com/v1")
