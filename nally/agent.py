@@ -7,6 +7,7 @@ Flow:
 
 from __future__ import annotations
 
+import contextlib
 import json
 from typing import Any
 
@@ -41,11 +42,14 @@ class Agent:
         max_tool_calls: int | None = None,
         session_store: Any | None = None,
         auto_persist: bool = True,
+        on_tool_start: Any | None = None,
     ) -> None:
         self.llm: LLMClient = llm_client or default_client
         self.registry: ToolRegistry = registry or build_default_registry()
         self.max_iterations = max_iterations if max_iterations is not None else MAX_ITERATIONS
         self.max_tool_calls = max_tool_calls if max_tool_calls is not None else MAX_TOOL_CALLS
+
+        self.on_tool_start = on_tool_start
 
         system_content = system_prompt if system_prompt is not None else get_system_prompt()
         self.messages: list[dict[str, Any]] = [{"role": "system", "content": system_content}]
@@ -220,6 +224,11 @@ class Agent:
                     self.messages.append(tool_err)
                     self._persist(tool_err)
                     continue
+
+                # UX: notify before execution (best-effort, never crash)
+                if self.on_tool_start is not None:
+                    with contextlib.suppress(Exception):
+                        self.on_tool_start(name, args)
 
                 # Registry handles validation + execution + truncation
                 result_text, _success = self.registry.execute(name, args)

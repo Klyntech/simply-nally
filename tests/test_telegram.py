@@ -500,6 +500,7 @@ class TestBotHandlers:
         # placeholder
         placeholder = AsyncMock()
         placeholder.edit_text = AsyncMock()
+        placeholder.message_id = 12345
         update.message.reply_text.return_value = placeholder
         update.effective_user.id = 777
         update.effective_chat.id = 1
@@ -507,10 +508,12 @@ class TestBotHandlers:
         context._nally_locks = {}
         context.bot.send_chat_action = AsyncMock()
         context.bot.send_message = AsyncMock()
+        context.bot.edit_message_text = AsyncMock()
 
         fake_user = {"id": "uid1", "google_id": "gid1", "telegram_id": "777", "email": "e@x.com"}
         fake_agent = MagicMock()
         fake_agent.run.return_value = "reply text"
+        fake_agent.on_tool_start = None
 
         with patch("nally.db.is_configured", return_value=True):
             with patch("nally.db.get_user_by_telegram_id", return_value=fake_user):
@@ -519,8 +522,12 @@ class TestBotHandlers:
                         await handle_message(update, context)
                         # Should have called agent.run via to_thread
                         assert True  # run is mocked, but we patch _get_or_create_agent
-                        # Placeholder should be edited
-                        assert placeholder.edit_text.called or context.bot.send_message.called
+                        # Placeholder should be edited via StatusUpdater (bot.edit_message_text) or fallback
+                        assert (
+                            context.bot.edit_message_text.called
+                            or placeholder.edit_text.called
+                            or context.bot.send_message.called
+                        )
 
     @pytest.mark.asyncio
     async def test_handle_link_already_linked(self):
@@ -617,3 +624,152 @@ class TestBotHandlers:
                         return
                     # If it didn't raise, allow (maybe telegram is installed)
                     pass
+
+
+# ------------------------------------------------------------------ telegram ux (status updater)
+class TestTelegramUx:
+    def test_tool_status_map(self):
+        from nally.telegram.ux import TOOL_STATUS, friendly_status
+
+        assert TOOL_STATUS["web_search"] == "Searching the web"
+        assert TOOL_STATUS["fetch"] == "Reading webpage"
+        assert TOOL_STATUS["run_command"] == "Running command on your computer"
+        assert TOOL_STATUS["read_file"] == "Reading file"
+        assert TOOL_STATUS["write_file"] == "Writing file"
+        assert TOOL_STATUS["list_dir"] == "Listing files"
+        assert friendly_status("web_search") == "Searching the web"
+        assert friendly_status("unknown_tool") == "Using unknown_tool"
+        assert friendly_status("fetch") == "Reading webpage"
+
+    @pytest.mark.asyncio
+    async def test_status_updater_finish(self):
+        from nally.telegram.ux import StatusUpdater
+
+        bot = AsyncMock()
+        bot.edit_message_text = AsyncMock()
+        loop = asyncio.get_running_loop()
+        updater = StatusUpdater(bot=bot, chat_id=1, message_id=99, loop=loop)
+        await updater.finish("final answer")
+        assert bot.edit_message_text.called
+        assert bot.edit_message_text.call_args[1]["text"] == "final answer"
+        assert bot.edit_message_text.call_args[1]["chat_id"] == 1
+        assert bot.edit_message_text.call_args[1]["message_id"] == 99
+
+    @pytest.mark.asyncio
+    async def test_status_updater_update(self):
+        from nally.telegram.ux import StatusUpdater
+
+        bot = AsyncMock()
+        bot.edit_message_text = AsyncMock()
+        loop = asyncio.get_running_loop()
+        updater = StatusUpdater(bot=bot, chat_id=5, message_id=10, loop=loop)
+        await updater.update("Thinking...")
+        assert bot.edit_message_text.called
+        assert "Thinking" in bot.edit_message_text.call_args[1]["text"]
+
+    def test_status_updater_on_tool_start_threadsafe(self):
+        import contextlib
+
+        from nally.telegram.ux import StatusUpdater
+
+        bot = MagicMock()
+        bot.edit_message_text = AsyncMock()
+        loop = MagicMock()
+        updater = StatusUpdater(bot=bot, chat_id=1, message_id=1, loop=loop)
+        # Patch run_coroutine_threadsafe to avoid needing real loop, close coroutine to suppress warning
+        def _close(coro, _loop):
+            with contextlib.suppress(Exception):
+                coro.close()
+            return MagicMock()
+
+        with patch("asyncio.run_coroutine_threadsafe", side_effect=_close) as mock_run:
+            updater.on_tool_start("web_search", {})
+            assert mock_run.called
+            # called with a coroutine and the loop
+            assert mock_run.call_args[0][1] is loop
+        # friendly text should be Searching the web (checked via the coroutine)
+        # We can't easily inspect coroutine text, but we verified it was scheduled
+
+    def test_status_updater_rate_limit(self):
+        import contextlib
+
+        from nally.telegram.ux import StatusUpdater
+
+        bot = MagicMock()
+        loop = MagicMock()
+        updater = StatusUpdater(bot=bot, chat_id=1, message_id=1, loop=loop)
+
+        def _close(coro, _loop):
+            with contextlib.suppress(Exception):
+                coro.close()
+            return MagicMock()
+
+        with patch("asyncio.run_coroutine_threadsafe", side_effect=_close) as mock_run:
+            with patch("time.monotonic", side_effect=[0.0, 0.1, 0.6]):
+                updater.on_tool_start("web_search", {})  # t=0.0, should run
+                assert mock_run.call_count == 1
+                updater.on_tool_start("fetch", {})  # t=0.1, <0.5s, should skip
+                assert mock_run.call_count == 1
+                updater.on_tool_start("read_file", {})  # t=0.6, >0.5 from 0.0, should run
+                assert mock_run.call_count == 2
+
+    def test_status_updater_unknown_tool(self):
+        import contextlib
+
+        from nally.telegram.ux import StatusUpdater
+
+        bot = MagicMock()
+        loop = MagicMock()
+        updater = StatusUpdater(bot=bot, chat_id=1, message_id=1, loop=loop)
+
+        def _close(coro, _loop):
+            with contextlib.suppress(Exception):
+                coro.close()
+            return MagicMock()
+
+        with patch("asyncio.run_coroutine_threadsafe", side_effect=_close) as mock_run:
+            updater.on_tool_start("custom_tool", {})
+            assert mock_run.called
+
+    @pytest.mark.asyncio
+    async def test_agent_on_tool_start_called(self):
+        """Agent fires on_tool_start before tool execution."""
+        from nally.agent import Agent
+        from nally.llm import LLMClient
+        from unittest.mock import MagicMock as Mock
+        import json as _json
+
+        # Mock LLM to return a tool call then a final response
+        mock_llm = Mock(spec=LLMClient)
+        mock_llm.model = "test-model"
+
+        tool_call = Mock()
+        tool_call.id = "call_1"
+        tool_call.function.name = "list_dir"
+        tool_call.function.arguments = _json.dumps({"path": "."})
+
+        msg_with_tool = Mock()
+        msg_with_tool.content = ""
+        msg_with_tool.tool_calls = [tool_call]
+
+        msg_final = Mock()
+        msg_final.content = "done"
+        msg_final.tool_calls = None
+
+        resp1 = Mock(choices=[Mock(message=msg_with_tool)], model="test-model", usage=None)
+        resp2 = Mock(choices=[Mock(message=msg_final)], model="test-model", usage=None)
+        mock_llm.chat.side_effect = [resp1, resp2]
+
+        # Track callback
+        calls: list[str] = []
+
+        def on_tool(name, args):
+            calls.append(name)
+
+        agent = Agent(llm_client=mock_llm, auto_persist=False, on_tool_start=on_tool)
+        # Stub registry to avoid filesystem access
+        agent.registry.execute = lambda n, a: ("list ok", True)  # type: ignore
+
+        result = agent.run("hello")
+        assert result == "done"
+        assert calls == ["list_dir"]

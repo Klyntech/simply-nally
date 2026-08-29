@@ -450,29 +450,62 @@ async def handle_message(update, context) -> None:
         return
     lock[chat_id] = True
 
-    # Placeholder + typing loop
+    # Placeholder + typing loop + live UX status
+    placeholder = None
+    updater = None
     try:
-        placeholder = await update.message.reply_text("Thinking…")
+        placeholder = await update.message.reply_text("Thinking...")
     except Exception:
         placeholder = None
+
+    # Wire live status updater if we have a placeholder to edit
+    loop = None
+    prev_on_tool: Any | None = None
+    if placeholder is not None:
+        try:
+            loop = asyncio.get_running_loop()
+            from .ux import StatusUpdater
+
+            updater = StatusUpdater(
+                bot=context.bot,
+                chat_id=chat_id,
+                message_id=placeholder.message_id,
+                loop=loop,
+            )
+            prev_on_tool = getattr(agent, "on_tool_start", None)
+            agent.on_tool_start = updater.on_tool_start  # type: ignore[method-assign]
+        except Exception:
+            updater = None
+            loop = None
 
     stop_event = asyncio.Event()
     typing_task = asyncio.create_task(typing_loop(context.bot, chat_id, stop_event))
     try:
-        # Agent.run is sync — run in thread
+        # Agent.run is sync — run in thread (updater edits happen from that thread)
         reply: str = await asyncio.to_thread(agent.run, text)
         if not reply or not reply.strip():
             reply = "(no reply)"
 
+        # Restore previous callback before sending final answer
+        if updater is not None:
+            with contextlib.suppress(Exception):
+                agent.on_tool_start = prev_on_tool  # type: ignore[method-assign]
+
         chunks = split_message(reply)
-        # Edit placeholder with first chunk, send rest as new messages
+        # Edit single status message with final answer, send rest as new messages
         if placeholder is not None:
-            try:
-                await placeholder.edit_text(chunks[0])
-            except Exception:
-                await context.bot.send_message(chat_id=chat_id, text=chunks[0])
+            if updater is not None:
+                try:
+                    await updater.finish(chunks[0])
+                except Exception:
+                    with contextlib.suppress(Exception):
+                        await placeholder.edit_text(chunks[0])
+            else:
+                try:
+                    await placeholder.edit_text(chunks[0])
+                except Exception:
+                    await context.bot.send_message(chat_id=chat_id, text=chunks[0])
             for chunk in chunks[1:]:
-                # Respect per-chat rate (1/sec)
                 await asyncio.sleep(0.6)
                 await context.bot.send_message(chat_id=chat_id, text=chunk)
         else:
@@ -480,15 +513,29 @@ async def handle_message(update, context) -> None:
                 await context.bot.send_message(chat_id=chat_id, text=chunk)
                 await asyncio.sleep(0.3)
     except Exception as exc:
+        # Restore callback on error too
+        if updater is not None:
+            with contextlib.suppress(Exception):
+                agent.on_tool_start = prev_on_tool  # type: ignore[method-assign]
         err = f"Error: {type(exc).__name__}: {exc}"
         if placeholder is not None:
-            try:
-                await placeholder.edit_text(err[:4000])
-            except Exception:
-                await context.bot.send_message(chat_id=chat_id, text=err[:4000])
+            if updater is not None:
+                with contextlib.suppress(Exception):
+                    await updater.finish(err[:4000])
+                    err = ""  # already sent via edit
+            if err:
+                try:
+                    await placeholder.edit_text(err[:4000])
+                except Exception:
+                    await context.bot.send_message(chat_id=chat_id, text=err[:4000])
         else:
             await context.bot.send_message(chat_id=chat_id, text=err[:4000])
     finally:
+        # Ensure callback restored even if typing cleanup fails
+        if updater is not None:
+            with contextlib.suppress(Exception):
+                if getattr(agent, "on_tool_start", None) is updater.on_tool_start:
+                    agent.on_tool_start = prev_on_tool  # type: ignore[method-assign]
         stop_event.set()
         try:
             await asyncio.wait_for(typing_task, timeout=2.0)
