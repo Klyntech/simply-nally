@@ -39,6 +39,8 @@ class Agent:
         system_prompt: str | None = None,
         max_iterations: int | None = None,
         max_tool_calls: int | None = None,
+        session_store: Any | None = None,
+        auto_persist: bool = True,
     ) -> None:
         self.llm: LLMClient = llm_client or default_client
         self.registry: ToolRegistry = registry or build_default_registry()
@@ -48,25 +50,97 @@ class Agent:
         system_content = system_prompt if system_prompt is not None else get_system_prompt()
         self.messages: list[dict[str, Any]] = [{"role": "system", "content": system_content}]
 
+        # Persistence: optional SessionStore (NEON). None = in-memory only.
+        self.session_store = session_store
+        if self.session_store is None and auto_persist:
+            try:
+                from .session import get_session_store
+
+                self.session_store = get_session_store()
+            except Exception:
+                self.session_store = None
+
+        # If persisted session has history, load it (replaces the fresh system prompt)
+        if self.session_store is not None:
+            try:
+                loaded = self.session_store.load()
+                if loaded:
+                    self.messages = loaded
+                else:
+                    # First run for this user — persist the system prompt so the DB isn't empty
+                    self.session_store.append(self.messages[0])
+            except Exception:
+                pass  # never crash on persistence
+
+    # ---------------------------------------------------------------- persist
+    def _persist(self, message: dict[str, Any], response=None) -> None:
+        """Best-effort persist a message + usage (never raises)."""
+        if self.session_store is None:
+            return
+        try:
+            model = None
+            prompt_tokens = completion_tokens = total_tokens = None
+            # Try to extract usage/model from the LLM response if provided
+            if response is not None:
+                try:
+                    model = getattr(response, "model", None) or self.llm.model
+                except Exception:
+                    model = self.llm.model
+                usage = getattr(response, "usage", None)
+                if usage is not None:
+                    prompt_tokens = getattr(usage, "prompt_tokens", None)
+                    completion_tokens = getattr(usage, "completion_tokens", None)
+                    total_tokens = getattr(usage, "total_tokens", None)
+                    # OpenAI sometimes uses dict-like usage
+                    if isinstance(usage, dict):
+                        prompt_tokens = usage.get("prompt_tokens")
+                        completion_tokens = usage.get("completion_tokens")
+                        total_tokens = usage.get("total_tokens")
+                elif isinstance(response, dict) and "usage" in response:
+                    u = response["usage"]
+                    if isinstance(u, dict):
+                        prompt_tokens = u.get("prompt_tokens")
+                        completion_tokens = u.get("completion_tokens")
+                        total_tokens = u.get("total_tokens")
+            # Assistant messages should carry model even without usage
+            if message.get("role") == "assistant" and model is None:
+                try:
+                    model = self.llm.model
+                except Exception:
+                    model = None
+            self.session_store.append(
+                message,
+                model=model,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=total_tokens,
+            )
+        except Exception:
+            pass
+
     # ------------------------------------------------------------------ public
     def run(self, user_input: str) -> str:
         """Process a user message and return the final assistant response."""
         if not user_input or not user_input.strip():
             return "Please provide a message."
 
-        self.messages.append({"role": "user", "content": user_input})
+        user_msg: dict[str, Any] = {"role": "user", "content": user_input}
+        self.messages.append(user_msg)
+        self._persist(user_msg)
 
         total_tool_calls = 0
 
         for _iteration in range(1, self.max_iterations + 1):
             # Guard: too many tool calls overall
             if total_tool_calls >= self.max_tool_calls:
-                msg = (
+                msg_text = (
                     f"Stopped: reached max tool calls ({self.max_tool_calls}). "
                     f"Partial progress saved in history."
                 )
-                self.messages.append({"role": "assistant", "content": msg})
-                return msg
+                stop_msg: dict[str, Any] = {"role": "assistant", "content": msg_text}
+                self.messages.append(stop_msg)
+                self._persist(stop_msg)
+                return msg_text
 
             # Call LLM
             try:
@@ -76,11 +150,15 @@ class Agent:
                 )
             except LLMError as exc:
                 err_msg = f"LLM error: {exc}"
-                self.messages.append({"role": "assistant", "content": err_msg})
+                err: dict[str, Any] = {"role": "assistant", "content": err_msg}
+                self.messages.append(err)
+                self._persist(err)
                 return err_msg
             except Exception as exc:
                 err_msg = f"Unexpected LLM error: {type(exc).__name__}: {exc}"
-                self.messages.append({"role": "assistant", "content": err_msg})
+                err2: dict[str, Any] = {"role": "assistant", "content": err_msg}
+                self.messages.append(err2)
+                self._persist(err2)
                 return err_msg
 
             choice = response.choices[0]
@@ -93,7 +171,9 @@ class Agent:
                 # Handle empty response
                 if not content.strip():
                     content = "(no response from model)"
-                self.messages.append({"role": "assistant", "content": content})
+                final_msg: dict[str, Any] = {"role": "assistant", "content": content}
+                self.messages.append(final_msg)
+                self._persist(final_msg, response=response)
                 return content
 
             # Process tool calls
@@ -114,6 +194,7 @@ class Agent:
                 ],
             }
             self.messages.append(assistant_msg)
+            self._persist(assistant_msg, response=response)
 
             # Execute each tool call sequentially (simple, deterministic)
             for tc in tool_calls:
@@ -131,25 +212,25 @@ class Agent:
                         args = {}
                 except json.JSONDecodeError as exc:
                     tool_result = f"Error: invalid JSON arguments for '{name}': {exc}"
-                    self.messages.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": tc.id,
-                            "content": tool_result,
-                        }
-                    )
+                    tool_err: dict[str, Any] = {
+                        "role": "tool",
+                        "tool_call_id": tc.id,
+                        "content": tool_result,
+                    }
+                    self.messages.append(tool_err)
+                    self._persist(tool_err)
                     continue
 
                 # Registry handles validation + execution + truncation
                 result_text, _success = self.registry.execute(name, args)
 
-                self.messages.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": tc.id,
-                        "content": result_text,
-                    }
-                )
+                tool_msg: dict[str, Any] = {
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": result_text,
+                }
+                self.messages.append(tool_msg)
+                self._persist(tool_msg)
 
             # Check if we hit limit during this batch
             if total_tool_calls >= self.max_tool_calls:
@@ -169,17 +250,28 @@ class Agent:
                         final.choices[0].message.content
                         or "Tool limit reached. Partial results available."
                     )
+                    # Try to persist the summary with its response
+                    summary_msg: dict[str, Any] = {"role": "assistant", "content": summary}
+                    self.messages.append(summary_msg)
+                    self._persist(summary_msg, response=final)
+                    return summary
                 except Exception:
                     summary = "Tool limit reached. Partial results available."
-                self.messages.append({"role": "assistant", "content": summary})
-                return summary
+                    summary_msg2: dict[str, Any] = {"role": "assistant", "content": summary}
+                    self.messages.append(summary_msg2)
+                    self._persist(summary_msg2)
+                    return summary
 
             # Otherwise continue loop — LLM will see tool results next iteration
 
         # If we exit loop without returning, we hit max iterations
-        msg = f"Stopped: reached max iterations ({self.max_iterations}) without final response."
-        self.messages.append({"role": "assistant", "content": msg})
-        return msg
+        msg_text2 = (
+            f"Stopped: reached max iterations ({self.max_iterations}) without final response."
+        )
+        stop2: dict[str, Any] = {"role": "assistant", "content": msg_text2}
+        self.messages.append(stop2)
+        self._persist(stop2)
+        return msg_text2
 
     def clear_history(self) -> None:
         """Reset to just the system prompt."""
@@ -190,6 +282,12 @@ class Agent:
             self.messages = [system_msg]
         else:
             self.messages = [{"role": "system", "content": get_system_prompt()}]
+        # Persist clear to DB (delete old messages, keep system prompt)
+        if self.session_store is not None:
+            import contextlib
+
+            with contextlib.suppress(Exception):
+                self.session_store.clear(keep_system_prompt=self.messages[0].get("content", ""))
 
     def get_history(self) -> list[dict[str, Any]]:
         return list(self.messages)
