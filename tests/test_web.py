@@ -215,8 +215,8 @@ class TestWebRegistry:
         reg = build_default_registry()
         assert "web_search" in reg
         assert "fetch" in reg
-        # Total should be 6: read_file, write_file, list_dir, run_command, web_search, fetch
-        assert len(reg) == 6
+        # Total should be 7: read_file, write_file, list_dir, run_command, web_search, fetch, think
+        assert len(reg) == 7
 
     def test_web_tools_via_registry(self):
         reg = build_default_registry()

@@ -12,6 +12,7 @@ import time
 from typing import Any
 
 TOOL_STATUS: dict[str, str] = {
+    "think": "Thinking",
     "web_search": "Searching the web",
     "fetch": "Reading webpage",
     "run_command": "Running command on your computer",
