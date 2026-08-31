@@ -889,4 +889,7 @@ def run_bot(token: str | None = None, *, drop_pending_updates: bool = False) -> 
 
     # Also handle /clear etc as plain text "/clear" (some clients)
     logger.info("Telegram bot starting (polling)…")
-    app.run_polling(drop_pending_updates=drop_pending_updates, allowed_updates=["message"])
+    app.run_polling(
+        drop_pending_updates=drop_pending_updates,
+        allowed_updates=["message", "callback_query"],
+    )
