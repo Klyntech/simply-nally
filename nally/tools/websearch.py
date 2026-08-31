@@ -1,17 +1,74 @@
-"""Web search tool — DuckDuckGo (free, no key) with raw scrape fallback."""
+"""Web search tool — DuckDuckGo (free, no key) with provider/fallback separation.
+
+Architecture::
+
+    SearchProvider -> list[SearchResult] -> WebSearch tool formats for LLM
+
+Two providers:
+  1. DDGS library (duckduckgo_search / ddgs) — preferred
+  2. Raw HTTP scrape of lite.duckduckgo.com — stdlib-only fallback
+"""
 
 from __future__ import annotations
 
+import logging
 import re
 import urllib.parse
 import urllib.request
+from dataclasses import dataclass
 from typing import Any
 
 from .base import Tool
 
+logger = logging.getLogger(__name__)
 
-def _fallback_scrape(query: str, num_results: int) -> str:
-    """Last resort: scrape lite.duckduckgo.com/lite/ with stdlib only."""
+
+# ---------------------------------------------------------------------------
+# SearchResult — normalized search result
+# ---------------------------------------------------------------------------
+@dataclass
+class SearchResult:
+    """Normalized search result from any provider."""
+
+    title: str
+    url: str
+    snippet: str
+
+
+# ---------------------------------------------------------------------------
+# Providers
+# ---------------------------------------------------------------------------
+def _ddg_library_search(query: str, num_results: int) -> list[SearchResult] | None:
+    """Try DDGS library (new or legacy package name)."""
+    def _search(q: str, n: int) -> list[dict[str, Any]]:
+        try:
+            from ddgs import DDGS as _DDGS  # type: ignore
+            with _DDGS() as ddgs:
+                return list(ddgs.text(q, max_results=n))
+        except ImportError:
+            from duckduckgo_search import DDGS as _DDGS2  # type: ignore
+            with _DDGS2() as ddgs:
+                return list(ddgs.text(q, max_results=n))
+
+    try:
+        raw = _search(query, num_results)
+        results = []
+        for r in raw:
+            title = (r.get("title") or "").strip()
+            url = (r.get("href") or r.get("link") or "").strip()
+            snippet = (r.get("body") or r.get("snippet") or "").strip()
+            if title and url:
+                results.append(SearchResult(title=title, url=url, snippet=snippet))
+        return results if results else None
+    except ImportError:
+        return None  # library not installed
+    except Exception as exc:
+        logger.debug("DDGS library search failed: %s: %s", type(exc).__name__, exc)
+        return None
+
+
+def _fallback_scrape_search(query: str, num_results: int) -> list[SearchResult]:
+    """Scrape lite.duckduckgo.com with stdlib only."""
     try:
         data = urllib.parse.urlencode({"q": query}).encode()
         req = urllib.request.Request(
@@ -23,19 +80,15 @@ def _fallback_scrape(query: str, num_results: int) -> str:
         with urllib.request.urlopen(req, timeout=12) as resp:
             html = resp.read().decode("utf-8", errors="ignore")
 
-        # Extract result links/titles from lite DDG HTML
-        # lite DDG uses <a href="...">title</a> with snippets in nearby <td>
         pattern = re.compile(r'<a[^>]+href="([^"]+)"[^>]*>([^<]+)</a>', re.IGNORECASE)
         matches = pattern.findall(html)
-        # Filter to actual result URLs (skip DDG internals)
-        results: list[str] = []
+        results: list[SearchResult] = []
         for href, title in matches:
             if "duckduckgo.com" in href or not href.startswith("http"):
                 continue
             title = title.strip()
             if not title or len(title) < 3:
                 continue
-            # Unescape basic entities
             title = (
                 title.replace("&amp;", "&")
                 .replace("&lt;", "<")
@@ -43,19 +96,26 @@ def _fallback_scrape(query: str, num_results: int) -> str:
                 .replace("&quot;", '"')
             )
             href = href.replace("&amp;", "&")
-            results.append(f"{title}\n{href}")
+            results.append(SearchResult(title=title, url=href, snippet=""))
             if len(results) >= num_results:
                 break
-
-        if not results:
-            return "No results found (fallback scrape returned empty)."
-
-        return "\n\n".join(f"{i + 1}. {r}" for i, r in enumerate(results))
-
+        return results
     except Exception as exc:
-        return f"Error: fallback search failed: {type(exc).__name__}: {exc}"
+        logger.debug("Fallback scrape failed: %s: %s", type(exc).__name__, exc)
+        return []
 
 
+def search(query: str, num_results: int = 3) -> list[SearchResult]:
+    """Search with library-first, fallback-scrape-second strategy."""
+    results = _ddg_library_search(query, num_results)
+    if results is not None:
+        return results
+    return _fallback_scrape_search(query, num_results)
+
+
+# ---------------------------------------------------------------------------
+# Tool — formats SearchResult for LLM
+# ---------------------------------------------------------------------------
 class WebSearch(Tool):
     def __init__(self) -> None:
         super().__init__(
@@ -81,55 +141,25 @@ class WebSearch(Tool):
         if len(query) > 500:
             return "Error: query too long (max 500 chars)"
 
-        # Clamp num_results
         try:
             n = int(num_results) if num_results is not None else 3
         except (ValueError, TypeError):
             n = 3
         n = max(1, min(5, n))
-        q = query.strip()
 
-        # Try DDGS library first (new name `ddgs`, fallback to legacy `duckduckgo_search`)
-        def _ddg_search(q: str, n: int):
-            try:
-                from ddgs import DDGS as _DDGS  # type: ignore
+        results = search(query.strip(), n)
 
-                with _DDGS() as ddgs:
-                    return list(ddgs.text(q, max_results=n))
-            except ImportError:
-                from duckduckgo_search import DDGS as _DDGS2  # type: ignore
+        if not results:
+            return "No results found."
 
-                with _DDGS2() as ddgs:
-                    return list(ddgs.text(q, max_results=n))
+        lines: list[str] = []
+        for i, r in enumerate(results, 1):
+            snippet = r.snippet.replace("\n", " ").strip()
+            if len(snippet) > 300:
+                snippet = snippet[:300] + "..."
+            lines.append(f"{i}. {r.title}\n{r.url}\n{snippet}")
 
-        try:
-            results = _ddg_search(q, n)
-
-            if not results:
-                return "No results found."
-
-            lines: list[str] = []
-            for i, r in enumerate(results, 1):
-                title = (r.get("title") or "").strip()
-                href = (r.get("href") or r.get("link") or "").strip()
-                body = (r.get("body") or r.get("snippet") or "").strip()
-                # Clean
-                body = body.replace("\n", " ").strip()
-                if len(body) > 300:
-                    body = body[:300] + "..."
-                lines.append(f"{i}. {title}\n{href}\n{body}")
-
-            return "\n\n".join(lines)
-
-        except ImportError:
-            # Library not installed — use fallback scrape
-            return _fallback_scrape(q, n)
-        except Exception as exc:
-            # Library failed (network, rate limit, etc.) — try fallback
-            fallback = _fallback_scrape(q, n)
-            if "Error: fallback" not in fallback and "No results" not in fallback:
-                return fallback
-            return f"Error: web search failed: {type(exc).__name__}: {exc}\nFallback: {fallback}"
+        return "\n\n".join(lines)
 
 
 def register_web_tools(registry) -> None:

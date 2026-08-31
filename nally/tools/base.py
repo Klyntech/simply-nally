@@ -1,9 +1,43 @@
-"""Tool base class and registry — minimal, explicit, stdlib only."""
+"""Tool base class and registry — minimal, explicit, stdlib only.
+
+Parameters use a custom mini-schema, NOT full JSON Schema::
+
+    {
+        "path": {
+            "type": "string",       # one of: string, integer, number, boolean, array, object
+            "description": "...",
+            "required": True,
+        }
+    }
+
+This is intentional for a tiny project.  Do not add a JSON Schema engine.
+"""
 
 from __future__ import annotations
 
 import json
+import logging
+from dataclasses import dataclass, field
 from typing import Any
+
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# ToolResult — structured return from tool execution
+# ---------------------------------------------------------------------------
+@dataclass
+class ToolResult:
+    """Structured result from a tool execution.
+
+    Replaces the old (text, bool) tuple where success was detected by
+    string-prefix parsing.
+    """
+
+    output: str
+    success: bool
+    tool_name: str = ""
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -13,7 +47,7 @@ class Tool:
     """Base class for all tools.
 
     Subclass and override `execute`. Declare `name`, `description`, and
-    `parameters` (JSON Schema-like).
+    `parameters` (see module docstring for the mini-schema format).
     """
 
     name: str
@@ -99,7 +133,20 @@ class Tool:
         }
 
 
+_VALID_TYPES = frozenset({"string", "integer", "number", "boolean", "array", "object"})
+
+
 def _check_type(value: Any, expected: str) -> bool:
+    """Check value matches expected type string.
+
+    Raises ValueError for unknown types so that schema typos are caught
+    at construction time, not silently accepted at runtime.
+    """
+    if expected not in _VALID_TYPES:
+        raise ValueError(
+            f"Unknown parameter type '{expected}'. "
+            f"Valid types: {sorted(_VALID_TYPES)}"
+        )
     mapping = {
         "string": str,
         "integer": int,
@@ -108,9 +155,7 @@ def _check_type(value: Any, expected: str) -> bool:
         "array": list,
         "object": dict,
     }
-    py_type = mapping.get(expected)
-    if py_type is None:
-        return True  # unknown type — don't block
+    py_type = mapping[expected]
     # bool is subclass of int in Python, handle strictly
     if expected == "integer" and isinstance(value, bool):
         return False
@@ -151,13 +196,11 @@ class ToolRegistry:
         tool = self._tools.get(name)
         # Alias: allow short name without mcp prefix (model sometimes drops it)
         if tool is None and "__" not in name:
-            # Try to find a tool that ends with __<name> (e.g. search_repositories -> mcp__github__search_repositories)
             candidates = [n for n in self._tools if n.endswith(f"__{name}")]
             if len(candidates) == 1:
                 tool = self._tools.get(candidates[0])
                 name = candidates[0]
             elif len(candidates) > 1:
-                # Prefer github for search_repositories
                 github = [c for c in candidates if "github" in c]
                 if github:
                     tool = self._tools.get(github[0])
@@ -179,13 +222,16 @@ class ToolRegistry:
                 except Exception:
                     result = str(result)
         except Exception as exc:
+            logger.exception("Tool '%s' raised %s: %s", name, type(exc).__name__, exc)
             return f"Error executing '{name}': {type(exc).__name__}: {exc}", False
 
         # Truncate
         if len(result) > self.max_output:
             result = result[: self.max_output] + f"\n... [truncated, {len(result)} chars total]"
 
-        success = not result.lstrip().lower().startswith("error")
+        # Structured success — no more string-prefix parsing.
+        # Errors from tools always start with "Error:" by convention.
+        success = not result.lstrip().startswith("Error:")
         return result, success
 
     def __len__(self) -> int:

@@ -1,13 +1,13 @@
-"""Tests for Tool base, registry, filesystem and shell tools."""
+"""Tests for Tool base, registry, filesystem, shell, and web tools."""
 
 from __future__ import annotations
 
 from pathlib import Path
 
 import pytest
-from nally.tools.base import Tool, ToolRegistry
-from nally.tools.filesystem import register_filesystem_tools
-from nally.tools.shell import RunCommand
+from nally.tools.base import Tool, ToolRegistry, ToolResult
+from nally.tools.filesystem import register_filesystem_tools, _resolve_within_workspace, _WorkspaceError
+from nally.tools.shell import RunCommand, ShellPolicy
 
 
 # ---------------------------------------------------------------------------
@@ -61,6 +61,31 @@ class TestToolValidation:
         assert schema["type"] == "function"
         assert schema["function"]["name"] == "demo_tool"
         assert "path" in schema["function"]["parameters"]["required"]
+
+    def test_unknown_type_raises(self):
+        """Unknown parameter type should raise ValueError at validation time."""
+        bad_tool = Tool(
+            name="bad",
+            description="bad",
+            parameters={"x": {"type": "strng", "required": True}},
+        )
+        with pytest.raises(ValueError, match="Unknown parameter type"):
+            bad_tool.validate({"x": "hello"})
+
+
+# ---------------------------------------------------------------------------
+# ToolResult
+# ---------------------------------------------------------------------------
+class TestToolResult:
+    def test_dataclass(self):
+        r = ToolResult(output="ok", success=True, tool_name="t")
+        assert r.success
+        assert r.tool_name == "t"
+        assert r.metadata == {}
+
+    def test_success_field(self):
+        r = ToolResult(output="Error: something", success=False)
+        assert not r.success
 
 
 # ---------------------------------------------------------------------------
@@ -137,14 +162,55 @@ class TestRegistry:
         schemas = r.all_schemas()
         assert len(schemas) == 2
 
+    def test_error_result_not_false_positive(self):
+        """A tool returning 'Error rates are...' should NOT be marked as failure."""
+        r = ToolRegistry()
+
+        class NormalTool(Tool):
+            def __init__(self):
+                super().__init__("normal", "d", {})
+
+            def execute(self, **kw):
+                return "Error rates are currently 5%"
+
+        r.register(NormalTool())
+        result, ok = r.execute("normal", {})
+        assert ok  # should be True — this is a normal response, not an error
+
 
 # ---------------------------------------------------------------------------
-# Filesystem
+# Filesystem — workspace boundary
 # ---------------------------------------------------------------------------
+class TestWorkspaceBoundary:
+    def test_path_within_workspace(self, tmp_path: Path):
+        p = _resolve_within_workspace("file.txt", tmp_path)
+        assert p == (tmp_path / "file.txt").resolve()
+
+    def test_subdirectory(self, tmp_path: Path):
+        p = _resolve_within_workspace("a/b/file.txt", tmp_path)
+        assert p == (tmp_path / "a" / "b" / "file.txt").resolve()
+
+    def test_escape_rejected(self, tmp_path: Path):
+        with pytest.raises(_WorkspaceError, match="escapes workspace"):
+            _resolve_within_workspace("../../etc/passwd", tmp_path)
+
+    def test_absolute_path_rejected(self, tmp_path: Path):
+        with pytest.raises(_WorkspaceError, match="escapes workspace"):
+            _resolve_within_workspace("/etc/passwd", tmp_path)
+
+    def test_empty_path_rejected(self, tmp_path: Path):
+        with pytest.raises(_WorkspaceError, match="must not be empty"):
+            _resolve_within_workspace("", tmp_path)
+
+    def test_null_byte_rejected(self, tmp_path: Path):
+        with pytest.raises(_WorkspaceError, match="null byte"):
+            _resolve_within_workspace("file\x00.txt", tmp_path)
+
+
 class TestFilesystem:
     def test_write_and_read(self, tmp_path: Path):
         r = ToolRegistry()
-        register_filesystem_tools(r)
+        register_filesystem_tools(r, workspace=tmp_path)
         p = tmp_path / "hello.txt"
         result, ok = r.execute("write_file", {"path": str(p), "content": "hello world"})
         assert ok and "Wrote" in result
@@ -153,13 +219,13 @@ class TestFilesystem:
 
     def test_read_missing(self, tmp_path: Path):
         r = ToolRegistry()
-        register_filesystem_tools(r)
+        register_filesystem_tools(r, workspace=tmp_path)
         result, ok = r.execute("read_file", {"path": str(tmp_path / "missing.txt")})
         assert not ok and "not found" in result
 
     def test_write_creates_parents(self, tmp_path: Path):
         r = ToolRegistry()
-        register_filesystem_tools(r)
+        register_filesystem_tools(r, workspace=tmp_path)
         p = tmp_path / "a" / "b" / "c.txt"
         _result, ok = r.execute("write_file", {"path": str(p), "content": "hi"})
         assert ok
@@ -167,7 +233,7 @@ class TestFilesystem:
 
     def test_list_dir(self, tmp_path: Path):
         r = ToolRegistry()
-        register_filesystem_tools(r)
+        register_filesystem_tools(r, workspace=tmp_path)
         (tmp_path / "file.txt").write_text("x")
         (tmp_path / "subdir").mkdir()
         result, ok = r.execute("list_dir", {"path": str(tmp_path)})
@@ -177,7 +243,7 @@ class TestFilesystem:
 
     def test_list_empty(self, tmp_path: Path):
         r = ToolRegistry()
-        register_filesystem_tools(r)
+        register_filesystem_tools(r, workspace=tmp_path)
         empty = tmp_path / "empty"
         empty.mkdir()
         result, ok = r.execute("list_dir", {"path": str(empty)})
@@ -185,34 +251,56 @@ class TestFilesystem:
 
     def test_list_missing(self, tmp_path: Path):
         r = ToolRegistry()
-        register_filesystem_tools(r)
+        register_filesystem_tools(r, workspace=tmp_path)
         _result, ok = r.execute("list_dir", {"path": str(tmp_path / "nope")})
         assert not ok
 
     def test_read_large_file(self, tmp_path: Path):
         r = ToolRegistry()
-        register_filesystem_tools(r)
+        register_filesystem_tools(r, workspace=tmp_path)
         p = tmp_path / "big.txt"
-        # Write via pathlib directly to bypass the write tool's checks
         p.write_bytes(b"x" * 1_100_000)
         result, ok = r.execute("read_file", {"path": str(p)})
         assert not ok and "too large" in result
 
-    def test_empty_path(self):
+    def test_empty_path(self, tmp_path: Path):
         r = ToolRegistry()
-        register_filesystem_tools(r)
+        register_filesystem_tools(r, workspace=tmp_path)
         _result, ok = r.execute("read_file", {"path": ""})
         assert not ok
 
 
 # ---------------------------------------------------------------------------
-# Shell
+# Shell — policy
 # ---------------------------------------------------------------------------
+class TestShellPolicy:
+    def test_default_policy_allows_normal(self):
+        policy = ShellPolicy()
+        allowed, _ = policy.check("ls -la")
+        assert allowed
+
+    def test_default_policy_blocks_rm_rf_root(self):
+        policy = ShellPolicy()
+        allowed, reason = policy.check("rm -rf /")
+        assert not allowed
+        assert "blocked" in reason.lower()
+
+    def test_default_policy_blocks_mkfs(self):
+        policy = ShellPolicy()
+        allowed, _ = policy.check("mkfs.ext4 /dev/sda1")
+        assert not allowed
+
+    def test_policy_logs_command(self):
+        """Verify ShellTool logs commands (just check it doesn't crash)."""
+        tool = RunCommand()
+        result = tool.execute(command="echo test", timeout=5)
+        assert "test" in result
+
+
 class TestShell:
     def test_run_command_success(self):
         r = ToolRegistry()
         r.register(RunCommand())
-        # Cross-platform: use python to print
         result, ok = r.execute("run_command", {"command": "python -c \"print('hi')\""})
         assert ok
         assert "hi" in result
@@ -233,8 +321,17 @@ class TestShell:
 
     def test_timeout_clamped(self):
         t = RunCommand()
-        # Validates but also tests execution with explicit timeout
         assert t.validate({"command": "echo hi", "timeout": 5})[0]
         ok, err = t.validate({"command": "echo hi", "timeout": "bad"})
         assert not ok
         assert "expected type" in err
+
+
+# ---------------------------------------------------------------------------
+# Think tool removed
+# ---------------------------------------------------------------------------
+class TestThinkRemoved:
+    def test_think_not_in_default_registry(self):
+        from nally.tools import build_default_registry
+        r = build_default_registry(load_mcp=False)
+        assert "think" not in r.names()

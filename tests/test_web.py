@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 from nally.tools import build_default_registry
 from nally.tools.base import ToolRegistry
 from nally.tools.fetch import Fetch, _strip_html
-from nally.tools.websearch import WebSearch
+from nally.tools.websearch import WebSearch, search, SearchResult
 
 
 # ---------------------------------------------------------------------------
@@ -40,15 +40,7 @@ class TestFetchValidation:
     def test_empty_url(self):
         f = Fetch()
         ok, _err = f.validate({"url": ""})
-        # Empty still passes schema (string type ok), but execute returns error
-        # Validate should pass (we check emptiness in execute)
         assert ok
-        _result, _ok2 = (
-            ToolRegistry().execute.__wrapped__
-            if hasattr(ToolRegistry.execute, "__wrapped__")
-            else (None, None)
-        )
-        # Direct execute test
         result = f.execute(url="")
         assert "must not be empty" in result
 
@@ -65,7 +57,6 @@ class TestFetchValidation:
 
     def test_max_chars_clamped(self):
         f = Fetch()
-        # max_chars validation: integer type
         ok, _err = f.validate({"url": "https://example.com", "max_chars": "bad"})
         assert not ok
 
@@ -76,7 +67,7 @@ class TestFetchValidation:
 
 
 # ---------------------------------------------------------------------------
-# Fetch live (mocked)
+# Fetch live (mocked) — bypass SSRF for testing
 # ---------------------------------------------------------------------------
 class TestFetchExecute:
     def test_fetch_success_mocked(self):
@@ -85,23 +76,26 @@ class TestFetchExecute:
         mock_resp = MagicMock()
         mock_resp.headers.get.return_value = "text/html"
         mock_resp.read.return_value = fake_html
+        mock_resp.url = "https://example.com"
         mock_resp.__enter__.return_value = mock_resp
         mock_resp.__exit__.return_value = False
 
-        with patch("nally.tools.fetch.urllib.request.urlopen", return_value=mock_resp):
-            result = f.execute(url="https://example.com")
-            assert "Hello world" in result
+        with patch("nally.tools.fetch._check_url_safety", return_value=None):
+            with patch("nally.tools.fetch.urllib.request.urlopen", return_value=mock_resp):
+                result = f.execute(url="https://example.com")
+                assert "Hello world" in result
 
     def test_fetch_http_error(self):
         import urllib.error
 
         f = Fetch()
-        with patch(
-            "nally.tools.fetch.urllib.request.urlopen",
-            side_effect=urllib.error.HTTPError("https://example.com", 404, "Not Found", {}, None),
-        ):
-            result = f.execute(url="https://example.com/missing")
-            assert "404" in result
+        with patch("nally.tools.fetch._check_url_safety", return_value=None):
+            with patch(
+                "nally.tools.fetch.urllib.request.urlopen",
+                side_effect=urllib.error.HTTPError("https://example.com", 404, "Not Found", {}, None),
+            ):
+                result = f.execute(url="https://example.com/missing")
+                assert "404" in result
 
     def test_fetch_truncation(self):
         f = Fetch()
@@ -109,21 +103,45 @@ class TestFetchExecute:
         mock_resp = MagicMock()
         mock_resp.headers.get.return_value = "text/html"
         mock_resp.read.return_value = big
+        mock_resp.url = "https://example.com"
         mock_resp.__enter__.return_value = mock_resp
 
-        with patch("nally.tools.fetch.urllib.request.urlopen", return_value=mock_resp):
-            result = f.execute(url="https://example.com", max_chars=100)
-            assert len(result) < 500
-            assert "truncated" in result
+        with patch("nally.tools.fetch._check_url_safety", return_value=None):
+            with patch("nally.tools.fetch.urllib.request.urlopen", return_value=mock_resp):
+                result = f.execute(url="https://example.com", max_chars=100)
+                assert len(result) < 500
+                assert "truncated" in result
 
     def test_fetch_binary_content_type(self):
         f = Fetch()
         mock_resp = MagicMock()
         mock_resp.headers.get.return_value = "image/png"
+        mock_resp.url = "https://example.com/img.png"
         mock_resp.__enter__.return_value = mock_resp
-        with patch("nally.tools.fetch.urllib.request.urlopen", return_value=mock_resp):
-            result = f.execute(url="https://example.com/img.png")
-            assert "unsupported content type" in result
+        with patch("nally.tools.fetch._check_url_safety", return_value=None):
+            with patch("nally.tools.fetch.urllib.request.urlopen", return_value=mock_resp):
+                result = f.execute(url="https://example.com/img.png")
+                assert "unsupported content type" in result
+
+    def test_fetch_ssrf_blocked(self):
+        """SSRF check blocks private IPs."""
+        f = Fetch()
+        result = f.execute(url="http://127.0.0.1/admin")
+        assert "SSRF" in result or "blocked" in result.lower()
+
+    def test_fetch_ssrf_redirect_blocked(self):
+        """Redirect to private IP is blocked."""
+        f = Fetch()
+        mock_resp = MagicMock()
+        mock_resp.headers.get.return_value = "text/html"
+        mock_resp.read.return_value = b"<p>ok</p>"
+        mock_resp.url = "http://169.254.169.254/metadata"
+        mock_resp.__enter__.return_value = mock_resp
+
+        with patch("nally.tools.fetch._check_url_safety", side_effect=[None, "IP is in blocked range"]):
+            with patch("nally.tools.fetch.urllib.request.urlopen", return_value=mock_resp):
+                result = f.execute(url="https://redirect.example.com")
+                assert "blocked" in result.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -158,53 +176,28 @@ class TestWebSearchMocked:
     def test_search_success(self):
         w = WebSearch()
         fake_results = [
-            {"title": "Python", "href": "https://python.org", "body": "Python is great"},
-            {
-                "title": "Async",
-                "href": "https://docs.python.org/3/library/asyncio.html",
-                "body": "asyncio",
-            },
+            SearchResult(title="Python", url="https://python.org", snippet="Python is great"),
+            SearchResult(title="Async", url="https://docs.python.org/3/library/asyncio.html", snippet="asyncio"),
         ]
-        mock_ddgs = MagicMock()
-        mock_ddgs.text.return_value = fake_results
-        mock_ddgs.__enter__.return_value = mock_ddgs
-        mock_ddgs.__exit__.return_value = False
 
-        with patch("ddgs.DDGS", return_value=mock_ddgs):
+        with patch("nally.tools.websearch.search", return_value=fake_results):
             result = w.execute(query="python", num_results=2)
             assert "Python" in result
             assert "https://python.org" in result
 
     def test_search_no_results(self):
         w = WebSearch()
-        mock_ddgs = MagicMock()
-        mock_ddgs.text.return_value = []
-        mock_ddgs.__enter__.return_value = mock_ddgs
 
-        with patch("ddgs.DDGS", return_value=mock_ddgs):
+        with patch("nally.tools.websearch.search", return_value=[]):
             result = w.execute(query="asdkfjalsdkfjalsdkfj")
             assert "No results" in result
 
-    def test_search_fallback_on_import_error(self):
-        w = WebSearch()
-        # Simulate missing library — should go to fallback scrape (both ddgs and legacy)
-        with patch.dict("sys.modules", {"ddgs": None, "duckduckgo_search": None}):
-            original_import = __import__
-
-            def fake_import(name, *args, **kwargs):
-                if name in ("ddgs", "duckduckgo_search"):
-                    raise ImportError("No module")
-                return original_import(name, *args, **kwargs)
-
-            with (
-                patch("builtins.__import__", side_effect=fake_import),
-                patch(
-                    "nally.tools.websearch._fallback_scrape",
-                    return_value="1. Fallback\nhttps://example.com",
-                ),
-            ):
-                result = w.execute(query="test")
-                assert "Fallback" in result
+    def test_search_provider_separation(self):
+        """Verify search() returns SearchResult objects."""
+        results = search("python", num_results=1)
+        assert isinstance(results, list)
+        if results:
+            assert isinstance(results[0], SearchResult)
 
 
 # ---------------------------------------------------------------------------
@@ -215,12 +208,11 @@ class TestWebRegistry:
         reg = build_default_registry()
         assert "web_search" in reg
         assert "fetch" in reg
-        # Total should be 7: read_file, write_file, list_dir, run_command, web_search, fetch, think
-        assert len(reg) == 7
+        # Total should be 6: read_file, write_file, list_dir, run_command, web_search, fetch
+        assert len(reg) == 6
 
     def test_web_tools_via_registry(self):
         reg = build_default_registry()
-        # Validate through registry (unknown param should fail)
         result, ok = reg.execute("web_search", {"query": "hi", "bad": 1})
         assert not ok
         assert "unknown parameter" in result

@@ -117,7 +117,7 @@ class TestAgentBasic:
                 _FakeResponse(content="Done, wrote file."),
             ]
         )
-        agent = Agent(llm_client=llm, registry=build_default_registry())
+        agent = Agent(llm_client=llm, registry=build_default_registry(workspace=tmp_path))
         result = agent.run("write hello to out.txt")
         assert result == "Done, wrote file."
         assert p.read_text() == "hello"
@@ -219,7 +219,7 @@ class TestAgentBasic:
                 _FakeResponse(content="Got both."),
             ]
         )
-        agent = Agent(llm_client=llm, registry=build_default_registry())
+        agent = Agent(llm_client=llm, registry=build_default_registry(workspace=tmp_path))
         result = agent.run("read both")
         assert result == "Got both."
         # Both tool results should be in history

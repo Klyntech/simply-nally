@@ -3,36 +3,36 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
-from .base import Tool, ToolRegistry
+from .base import Tool, ToolRegistry, ToolResult
 from .fetch import register_fetch_tools
 from .filesystem import register_filesystem_tools
 from .shell import register_shell_tools
-from .think import register_think_tools
 from .websearch import register_web_tools
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["Tool", "ToolRegistry", "build_default_registry"]
+__all__ = ["Tool", "ToolRegistry", "ToolResult", "build_default_registry"]
 
 
 def build_default_registry(
     max_output: int = 8000,
     mcp_config: dict | None = None,
     load_mcp: bool = True,
+    workspace: Path | None = None,
 ) -> ToolRegistry:
-    """Create a registry with all v0.1 tools (+ MCP when enabled).
+    """Create a registry with all built-in tools (+ MCP when enabled).
 
     MCP tools are discovered via ``nally.mcp`` and injected as normalized
     ``Tool`` objects. Agent never knows whether a tool came from
     ``filesystem.py`` or an MCP server.
     """
     registry = ToolRegistry(max_output=max_output)
-    register_filesystem_tools(registry)
+    register_filesystem_tools(registry, workspace=workspace)
     register_shell_tools(registry)
     register_web_tools(registry)
     register_fetch_tools(registry)
-    register_think_tools(registry)
     if load_mcp:
         try:
             from ..config import MCP_ENABLED, get_mcp_servers_config
