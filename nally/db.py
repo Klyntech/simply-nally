@@ -9,6 +9,7 @@ all functions return None/[] and the agent runs in-memory only.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -76,11 +77,36 @@ def connect():
     return psycopg.connect(url)
 
 
+class _PooledConnection:
+    """Wrapper that makes a pool context manager behave like a raw connection.
+
+    Callers do: conn = pooled_connect(); try: ... finally: conn.close()
+    This wrapper ensures close() properly returns the connection to the pool.
+    """
+
+    def __init__(self, ctx: Any) -> None:
+        self._ctx = ctx
+        self._conn = ctx.__enter__()
+
+    def close(self) -> None:
+        with contextlib.suppress(Exception):
+            self._ctx.__exit__(None, None, None)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._conn, name)
+
+    def __enter__(self) -> _PooledConnection:
+        return self
+
+    def __exit__(self, *args: Any) -> None:
+        self.close()
+
+
 def pooled_connect():
     """Get a connection from the pool. Falls back to raw connect() if pool unavailable."""
     pool = _get_pool()
     if pool is not None:
-        return pool.connection()
+        return _PooledConnection(pool.connection())
     return connect()
 
 
