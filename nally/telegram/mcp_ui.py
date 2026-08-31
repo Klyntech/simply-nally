@@ -232,6 +232,22 @@ async def callback_notion_connect(query: Any, context: Any) -> None:
             "redirect_uri": redirect_uri,
         }
 
+        # Start callback server in background thread BEFORE sending auth URL
+        import threading
+        from http.server import HTTPServer
+
+        from nally.notion_oauth import CALLBACK_PORT, _CallbackHandler
+
+        _CallbackHandler.code = None
+        _CallbackHandler.state = None
+        _CallbackHandler.error = None
+
+        _server = HTTPServer(("0.0.0.0", CALLBACK_PORT), _CallbackHandler)
+        _server_thread = threading.Thread(target=_server.serve_forever, daemon=True)
+        _server_thread.start()
+        context.bot_data["_notion_server"] = _server
+        logger.info("Notion OAuth: callback server started on port %d", CALLBACK_PORT)
+
     except Exception as exc:
         with contextlib.suppress(Exception):
             await query.edit_message_text(f"Could not start Notion auth: {exc}")
@@ -272,6 +288,11 @@ async def callback_notion_connect(query: Any, context: Any) -> None:
             error = _CallbackHandler.error
             received_state = _CallbackHandler.state
 
+            # Shut down callback server
+            server = context.bot_data.pop("_notion_server", None)
+            if server:
+                server.shutdown()
+
             if error:
                 raise RuntimeError(f"Notion OAuth denied: {error}")
             if not code:
@@ -303,6 +324,10 @@ async def callback_notion_connect(query: Any, context: Any) -> None:
                 pass
 
         except Exception as exc:
+            # Ensure server is shut down on error too
+            server = context.bot_data.pop("_notion_server", None)
+            if server:
+                server.shutdown()
             try:
                 if status_msg is not None:
                     await status_msg.edit_text(f"Notion auth failed: {exc}")
