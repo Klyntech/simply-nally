@@ -9,7 +9,13 @@ Usage:
 """
 
 from .manager import MemoryManager
-from .models import MemoryRecord, MemoryType
+from .models import MemoryRecord, MemoryStoreError, MemoryType
 from .store import MemoryStore
 
-__all__ = ["MemoryManager", "MemoryRecord", "MemoryStore", "MemoryType"]
+__all__ = [
+    "MemoryManager",
+    "MemoryRecord",
+    "MemoryStore",
+    "MemoryStoreError",
+    "MemoryType",
+]

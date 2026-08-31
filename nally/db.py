@@ -719,7 +719,7 @@ def delete_session(conn, session_id: str) -> None:
 # Facts / Memory — explicit user knowledge
 # ---------------------------------------------------------------------------
 
-_FACT_COLS = ["id", "user_id", "type", "key", "value", "source", "confidence", "created_at", "updated_at"]
+_FACT_COLS = ["id", "user_id", "type", "key", "value", "source", "created_at", "updated_at"]
 
 
 def _row_to_fact(row: Any) -> dict[str, Any]:
@@ -734,24 +734,22 @@ def upsert_fact(
     value: str,
     *,
     source: str = "user",
-    confidence: float = 1.0,
 ) -> dict[str, Any]:
     """Insert or update a fact. Returns the record."""
     normalized_key = _normalize_key(key)
     with conn.cursor() as cur:
         cur.execute(
             """
-            INSERT INTO facts (user_id, type, key, value, source, confidence)
-            VALUES (%s, %s, %s, %s, %s, %s)
+            INSERT INTO facts (user_id, type, key, value, source)
+            VALUES (%s, %s, %s, %s, %s)
             ON CONFLICT (user_id, key) DO UPDATE SET
                 type = EXCLUDED.type,
                 value = EXCLUDED.value,
                 source = EXCLUDED.source,
-                confidence = EXCLUDED.confidence,
                 updated_at = NOW()
-            RETURNING id::text, user_id::text, type, key, value, source, confidence, created_at, updated_at
+            RETURNING id::text, user_id::text, type, key, value, source, created_at, updated_at
             """,
-            (user_id, type, normalized_key, value, source, confidence),
+            (user_id, type, normalized_key, value, source),
         )
         row = cur.fetchone()
         conn.commit()
@@ -763,7 +761,7 @@ def get_fact(conn, user_id: str, key: str) -> dict[str, Any] | None:
     normalized_key = _normalize_key(key)
     with conn.cursor() as cur:
         cur.execute(
-            """SELECT id::text, user_id::text, type, key, value, source, confidence, created_at, updated_at
+            """SELECT id::text, user_id::text, type, key, value, source, created_at, updated_at
                FROM facts WHERE user_id = %s AND key = %s""",
             (user_id, normalized_key),
         )
@@ -783,7 +781,7 @@ def search_facts(
     with conn.cursor() as cur:
         if type:
             cur.execute(
-                """SELECT id::text, user_id::text, type, key, value, source, confidence, created_at, updated_at
+                """SELECT id::text, user_id::text, type, key, value, source, created_at, updated_at
                    FROM facts
                    WHERE user_id = %s AND type = %s
                      AND (key ILIKE %s OR value ILIKE %s)
@@ -793,7 +791,7 @@ def search_facts(
             )
         else:
             cur.execute(
-                """SELECT id::text, user_id::text, type, key, value, source, confidence, created_at, updated_at
+                """SELECT id::text, user_id::text, type, key, value, source, created_at, updated_at
                    FROM facts
                    WHERE user_id = %s
                      AND (key ILIKE %s OR value ILIKE %s)
@@ -820,13 +818,13 @@ def list_facts(conn, user_id: str, *, type: str | None = None) -> list[dict[str,
     with conn.cursor() as cur:
         if type:
             cur.execute(
-                """SELECT id::text, user_id::text, type, key, value, source, confidence, created_at, updated_at
+                """SELECT id::text, user_id::text, type, key, value, source, created_at, updated_at
                    FROM facts WHERE user_id = %s AND type = %s ORDER BY updated_at DESC""",
                 (user_id, type),
             )
         else:
             cur.execute(
-                """SELECT id::text, user_id::text, type, key, value, source, confidence, created_at, updated_at
+                """SELECT id::text, user_id::text, type, key, value, source, created_at, updated_at
                    FROM facts WHERE user_id = %s ORDER BY updated_at DESC""",
                 (user_id,),
             )

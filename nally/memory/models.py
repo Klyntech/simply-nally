@@ -15,6 +15,14 @@ class MemoryType(StrEnum):
     PROJECT = "project"
 
 
+class MemoryStoreError(Exception):
+    """Raised when a memory storage operation fails (DB down, connection lost, etc.).
+
+    Distinguished from "no result" — a failed recall() means the store is broken,
+    not that the key doesn't exist.
+    """
+
+
 @dataclass
 class MemoryRecord:
     """A single memory entry — explicit knowledge about a user."""
@@ -25,7 +33,6 @@ class MemoryRecord:
     key: str
     value: str
     source: str = "user"
-    confidence: float = 1.0
     created_at: datetime | None = None
     updated_at: datetime | None = None
 
@@ -39,7 +46,6 @@ class MemoryRecord:
             key=row["key"],
             value=row["value"],
             source=row.get("source", "user"),
-            confidence=float(row.get("confidence", 1.0)),
             created_at=row.get("created_at"),
             updated_at=row.get("updated_at"),
         )

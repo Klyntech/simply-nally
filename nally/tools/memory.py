@@ -2,6 +2,8 @@
 
 These tools let the agent save, retrieve, search, and delete user
 facts/preferences. Only available when a user_id is provided (persistence enabled).
+
+Tools receive a shared MemoryStore instance via constructor injection.
 """
 
 from __future__ import annotations
@@ -9,6 +11,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from ..memory.models import MemoryStoreError, MemoryType
+from ..memory.store import MemoryStore
 from .base import Tool
 
 logger = logging.getLogger(__name__)
@@ -17,7 +21,7 @@ logger = logging.getLogger(__name__)
 class RememberTool(Tool):
     """Save a fact or preference about the user."""
 
-    def __init__(self, user_id: str) -> None:
+    def __init__(self, store: MemoryStore) -> None:
         super().__init__(
             name="remember",
             description=(
@@ -46,22 +50,23 @@ class RememberTool(Tool):
                 },
             },
         )
-        self.user_id = user_id
+        self._store = store
 
     def execute(self, key: str = "", value: str = "", type: str = "fact", **kwargs: Any) -> str:
-        from ..memory.store import MemoryStore
-
-        store = MemoryStore(self.user_id)
-        record = store.remember(key=key, value=value, type=type)
-        if record:
+        try:
+            memory_type = MemoryType(type)
+            record = self._store.remember(key=key, value=value, type=memory_type)
             return f"Remembered: {record.key} = {record.value} ({record.type.value})"
-        return "Error: failed to save memory"
+        except MemoryStoreError:
+            return "Error: memory storage unavailable"
+        except ValueError:
+            return f"Error: invalid memory type '{type}'"
 
 
 class RecallTool(Tool):
     """Look up a specific fact about the user."""
 
-    def __init__(self, user_id: str) -> None:
+    def __init__(self, store: MemoryStore) -> None:
         super().__init__(
             name="recall",
             description="Look up a specific fact or preference about the user by key.",
@@ -73,22 +78,22 @@ class RecallTool(Tool):
                 },
             },
         )
-        self.user_id = user_id
+        self._store = store
 
     def execute(self, key: str = "", **kwargs: Any) -> str:
-        from ..memory.store import MemoryStore
-
-        store = MemoryStore(self.user_id)
-        record = store.recall(key)
-        if record:
-            return f"{record.key} = {record.value} ({record.type.value}, confidence: {record.confidence})"
-        return f"No memory found for key '{key}'."
+        try:
+            record = self._store.recall(key)
+            if record:
+                return f"{record.key} = {record.value} ({record.type.value})"
+            return f"No memory found for key '{key}'."
+        except MemoryStoreError:
+            return "Error: memory storage unavailable"
 
 
 class SearchMemoryTool(Tool):
     """Search memories by keyword."""
 
-    def __init__(self, user_id: str) -> None:
+    def __init__(self, store: MemoryStore) -> None:
         super().__init__(
             name="search_memory",
             description="Search through stored memories by keyword in key or value.",
@@ -106,26 +111,29 @@ class SearchMemoryTool(Tool):
                 },
             },
         )
-        self.user_id = user_id
+        self._store = store
 
     def execute(self, query: str = "", type_filter: str | None = None, **kwargs: Any) -> str:
-        from ..memory.store import MemoryStore
+        try:
+            type_val = MemoryType(type_filter) if type_filter else None
+            results = self._store.search(query, type=type_val, limit=5)
+            if not results:
+                return f"No memories found matching '{query}'."
 
-        store = MemoryStore(self.user_id)
-        results = store.search(query, type=type_filter, limit=5)
-        if not results:
-            return f"No memories found matching '{query}'."
-
-        lines = [f"Found {len(results)} memor(y/ies):"]
-        for m in results:
-            lines.append(f"  - {m.key}: {m.value} ({m.type.value})")
-        return "\n".join(lines)
+            lines = [f"Found {len(results)} memor(y/ies):"]
+            for m in results:
+                lines.append(f"  - {m.key}: {m.value} ({m.type.value})")
+            return "\n".join(lines)
+        except MemoryStoreError:
+            return "Error: memory storage unavailable"
+        except ValueError:
+            return f"Error: invalid type filter '{type_filter}'"
 
 
 class ForgetTool(Tool):
     """Delete a specific memory."""
 
-    def __init__(self, user_id: str) -> None:
+    def __init__(self, store: MemoryStore) -> None:
         super().__init__(
             name="forget",
             description="Delete a specific fact or preference about the user.",
@@ -137,25 +145,25 @@ class ForgetTool(Tool):
                 },
             },
         )
-        self.user_id = user_id
+        self._store = store
 
     def execute(self, key: str = "", **kwargs: Any) -> str:
-        from ..memory.store import MemoryStore
+        try:
+            record = self._store.recall(key)
+            if not record:
+                return f"No memory found for key '{key}'."
 
-        store = MemoryStore(self.user_id)
-        record = store.recall(key)
-        if not record:
-            return f"No memory found for key '{key}'."
-
-        if store.forget(key):
-            return f"Forgot: {record.key} = {record.value}"
-        return f"Error: failed to forget memory '{key}'"
+            if self._store.forget(key):
+                return f"Forgot: {record.key} = {record.value}"
+            return f"Error: failed to forget memory '{key}'"
+        except MemoryStoreError:
+            return "Error: memory storage unavailable"
 
 
 class ListMemoriesTool(Tool):
     """List all stored memories."""
 
-    def __init__(self, user_id: str) -> None:
+    def __init__(self, store: MemoryStore) -> None:
         super().__init__(
             name="list_memories",
             description="List all stored memories about the user.",
@@ -168,26 +176,30 @@ class ListMemoriesTool(Tool):
                 },
             },
         )
-        self.user_id = user_id
+        self._store = store
 
     def execute(self, type_filter: str | None = None, **kwargs: Any) -> str:
-        from ..memory.store import MemoryStore
+        try:
+            type_val = MemoryType(type_filter) if type_filter else None
+            memories = self._store.list_all(type=type_val)
+            if not memories:
+                return "No memories stored yet."
 
-        store = MemoryStore(self.user_id)
-        memories = store.list_all(type=type_filter)
-        if not memories:
-            return "No memories stored yet."
-
-        lines = [f"Stored memories ({len(memories)}):"]
-        for m in memories:
-            lines.append(f"  - {m.key}: {m.value} ({m.type.value})")
-        return "\n".join(lines)
+            lines = [f"Stored memories ({len(memories)}):"]
+            for m in memories:
+                lines.append(f"  - {m.key}: {m.value} ({m.type.value})")
+            return "\n".join(lines)
+        except MemoryStoreError:
+            return "Error: memory storage unavailable"
+        except ValueError:
+            return f"Error: invalid type filter '{type_filter}'"
 
 
 def register_memory_tools(registry: Any, user_id: str) -> None:
     """Register all memory tools bound to a user_id."""
-    registry.register(RememberTool(user_id))
-    registry.register(RecallTool(user_id))
-    registry.register(SearchMemoryTool(user_id))
-    registry.register(ForgetTool(user_id))
-    registry.register(ListMemoriesTool(user_id))
+    store = MemoryStore(user_id)
+    registry.register(RememberTool(store))
+    registry.register(RecallTool(store))
+    registry.register(SearchMemoryTool(store))
+    registry.register(ForgetTool(store))
+    registry.register(ListMemoriesTool(store))

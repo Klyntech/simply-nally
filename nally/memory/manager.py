@@ -4,6 +4,7 @@ Handles:
 - Dynamic per-message memory retrieval (relevant memories injected before LLM call)
 - Explicit memory commands ("remember that...", "forget...", "what do you remember")
 - System prompt augmentation with relevant facts
+- Deterministic multi-pass retrieval with scoring
 """
 
 from __future__ import annotations
@@ -11,10 +12,20 @@ from __future__ import annotations
 import logging
 import re
 
-from .models import MemoryRecord, MemoryType
+from .models import MemoryRecord, MemoryStoreError, MemoryType
 from .store import MemoryStore
 
 logger = logging.getLogger(__name__)
+
+# Context injection limits
+_MAX_CONTEXT_CHARS = 2000
+_MAX_RECALL_MEMORIES = 10
+
+# Retrieval scoring weights
+_SCORE_EXACT_KEY = 100
+_SCORE_KEY_TOKEN = 50
+_SCORE_VALUE_ILIKE = 30
+_SCORE_TYPE_MATCH = 10
 
 # Patterns for explicit memory commands
 _REMEMBER_PATTERNS = [
@@ -49,7 +60,7 @@ class MemoryManager:
 
     def __init__(self, user_id: str) -> None:
         self.user_id = user_id
-        self._store = MemoryStore(user_id)
+        self._store = MemoryStore(user_id) if user_id else None
 
     @property
     def enabled(self) -> bool:
@@ -61,37 +72,72 @@ class MemoryManager:
     def get_relevant_memories(self, user_message: str, *, limit: int = 5) -> list[MemoryRecord]:
         """Retrieve memories relevant to the current user message.
 
-        v1: simple ILIKE search on key/value.
-        Future: embeddings + semantic similarity.
+        Multi-pass deterministic retrieval:
+          1. Exact key match (score 100)
+          2. Key token overlap (score 50 + overlap count)
+          3. Value ILIKE match (score 30)
+          4. Type-relevant defaults (score 10)
+
+        No embeddings needed for v1.
         """
-        if not self.enabled:
+        if not self.enabled or self._store is None:
             return []
 
-        # Extract meaningful words from the user message for search
         words = re.findall(r"[a-zA-Z]{3,}", user_message)
         if not words:
             return []
 
-        # Search with each word, deduplicate
-        seen_keys: set[str] = set()
-        results: list[MemoryRecord] = []
+        query_lower = user_message.lower()
+        scored: dict[str, tuple[int, MemoryRecord]] = {}
 
-        for word in words[:3]:  # Limit to 3 search terms
-            for mem in self._store.search(word, limit=limit):
-                if mem.key not in seen_keys:
-                    seen_keys.add(mem.key)
-                    results.append(mem)
-                if len(results) >= limit:
+        try:
+            all_memories = self._store.list_all()
+        except MemoryStoreError as exc:
+            logger.warning("Memory retrieval failed: %s", exc)
+            return []
+
+        if not all_memories:
+            return []
+
+        for mem in all_memories:
+            score = 0
+
+            # Pass 1: exact key match
+            if mem.key.lower() in query_lower:
+                score += _SCORE_EXACT_KEY
+
+            # Pass 2: key token overlap
+            key_tokens = set(re.findall(r"[a-zA-Z]{3,}", mem.key.lower()))
+            query_tokens = set(w.lower() for w in words)
+            overlap = key_tokens & query_tokens
+            if overlap:
+                score += _SCORE_KEY_TOKEN + len(overlap) * 10
+
+            # Pass 3: value ILIKE match
+            value_lower = mem.value.lower()
+            for word in words[:5]:
+                if word.lower() in value_lower:
+                    score += _SCORE_VALUE_ILIKE
                     break
-            if len(results) >= limit:
-                break
 
-        return results
+            # Pass 4: type relevance
+            if mem.type == MemoryType.INSTRUCTION:
+                score += _SCORE_TYPE_MATCH
+
+            if score > 0:
+                existing = scored.get(mem.key)
+                if existing is None or score > existing[0]:
+                    scored[mem.key] = (score, mem)
+
+        # Sort by score descending, then by recency
+        ranked = sorted(scored.values(), key=lambda x: (-x[0], x[1].updated_at or ""))
+        return [mem for _, mem in ranked[:limit]]
 
     def build_context_block(self, user_message: str) -> str:
         """Build a formatted string of relevant memories for system prompt injection.
 
         Returns empty string if no memories or memory disabled.
+        Enforces _MAX_CONTEXT_CHARS limit.
         """
         if not self.enabled:
             return ""
@@ -103,7 +149,12 @@ class MemoryManager:
         lines = ["## Known Facts About This User"]
         for m in memories:
             lines.append(m.to_context_line())
-        return "\n".join(lines)
+
+        block = "\n".join(lines)
+        if len(block) > _MAX_CONTEXT_CHARS:
+            block = block[:_MAX_CONTEXT_CHARS] + "\n... [truncated]"
+
+        return block
 
     # -------------------------------------------------------- command detection
 
@@ -141,50 +192,61 @@ class MemoryManager:
 
     def _handle_remember(self, statement: str) -> str:
         """Parse and store a 'remember that...' statement."""
-        # Try to parse "X is Y" or "X prefers Y" patterns
         key, value, mem_type = self._parse_statement(statement)
 
-        record = self._store.remember(key=key, value=value, type=mem_type)
-        if record:
+        try:
+            record = self._store.remember(key=key, value=value, type=mem_type)
             return f"Remembered: {record.key} = {record.value} ({record.type.value})"
-        return "Failed to save memory. Please try again."
+        except MemoryStoreError as exc:
+            logger.warning("Memory save failed: %s", exc)
+            return "Failed to save memory: storage unavailable. Please try again."
 
     def _handle_forget(self, target: str) -> str:
         """Forget a memory by key or value search."""
-        # First try direct key lookup
-        record = self._store.recall(target)
-        if record:
-            self._store.forget(record.key)
-            return f"Forgot: {record.key} = {record.value}"
+        try:
+            # First try direct key lookup
+            record = self._store.recall(target)
+            if record:
+                self._store.forget(record.key)
+                return f"Forgot: {record.key} = {record.value}"
 
-        # Try searching by value
-        results = self._store.search(target, limit=1)
-        if results:
-            self._store.forget(results[0].key)
-            return f"Forget: {results[0].key} = {results[0].value}"
+            # Try searching by value
+            results = self._store.search(target, limit=1)
+            if results:
+                self._store.forget(results[0].key)
+                return f"Forgot: {results[0].key} = {results[0].value}"
 
-        return f"I don't have any memory matching '{target}'."
+            return f"I don't have any memory matching '{target}'."
+        except MemoryStoreError as exc:
+            logger.warning("Memory forget failed: %s", exc)
+            return "Failed to access memory: storage unavailable."
 
     def _handle_recall(self) -> str:
         """List all stored memories."""
-        all_memories = self._store.list_all()
-        if not all_memories:
-            return "I don't have any memories stored yet."
+        try:
+            all_memories = self._store.list_all()
+            if not all_memories:
+                return "I don't have any memories stored yet."
 
-        lines = ["What I know about you:"]
-        for m in all_memories:
-            lines.append(f"  - {m.key}: {m.value} ({m.type.value})")
-        return "\n".join(lines)
+            lines = ["What I know about you:"]
+            for m in all_memories[:_MAX_RECALL_MEMORIES]:
+                lines.append(f"  - {m.key}: {m.value} ({m.type.value})")
+            if len(all_memories) > _MAX_RECALL_MEMORIES:
+                lines.append(f"  ... and {len(all_memories) - _MAX_RECALL_MEMORIES} more")
+            return "\n".join(lines)
+        except MemoryStoreError as exc:
+            logger.warning("Memory recall failed: %s", exc)
+            return "Failed to access memory: storage unavailable."
 
     # -------------------------------------------------------- statement parsing
 
-    def _parse_statement(self, statement: str) -> tuple[str, str, str]:
+    def _parse_statement(self, statement: str) -> tuple[str, str, MemoryType]:
         """Parse a natural language statement into (key, value, type).
 
         Examples:
-            "I prefer TypeScript" -> ("programming_language", "TypeScript", "preference")
-            "My name is Alex" -> ("name", "Alex", "profile")
-            "I use VS Code" -> ("code_editor", "VS Code", "preference")
+            "I prefer TypeScript" -> ("programming_language", "TypeScript", PREFERENCE)
+            "My name is Alex" -> ("name", "Alex", PROFILE)
+            "I use VS Code" -> ("code_editor", "VS Code", PREFERENCE)
         """
         # Pattern: "I prefer X" / "I like X" / "I use X"
         m = re.match(r"i (?:prefer|like|use|want) (.+)", statement, re.IGNORECASE)
@@ -258,7 +320,7 @@ class MemoryManager:
         k = re.sub(r"_+", "_", k).strip("_")
         return k[:64] if k else "general"
 
-    def _infer_type_from_key(self, key: str) -> str:
+    def _infer_type_from_key(self, key: str) -> MemoryType:
         """Infer memory type from the key name."""
         key_lower = key.lower()
         if "name" in key_lower or "age" in key_lower or "location" in key_lower:
