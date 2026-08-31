@@ -79,7 +79,7 @@ class MCPClient:
             return
         if not _has_mcp():
             raise RuntimeError(
-                "mcp package not installed. Install with: pip install \"simply-nally[mcp]\""
+                'mcp package not installed. Install with: pip install "simply-nally[mcp]"'
             )
         self._validate_config()
 
@@ -118,9 +118,7 @@ class MCPClient:
                     try:
                         import httpx
 
-                        http_client = httpx.AsyncClient(
-                            headers=headers, timeout=self.timeout
-                        )
+                        http_client = httpx.AsyncClient(headers=headers, timeout=self.timeout)
                     except ImportError:
                         # httpx not installed — let mcp create its own client
                         logger.warning("httpx not installed, ignoring custom headers")

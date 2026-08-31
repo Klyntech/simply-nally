@@ -18,6 +18,7 @@ from .gmail import GmailProvider
 from .manager import SUPPORTED_PROVIDERS, IntegrationManager
 from .notion import NotionProvider
 from .token_store import (
+    TokenStoreError,
     clear_all_user_tokens,
     clear_token,
     get_account_info,
@@ -32,6 +33,7 @@ __all__ = [
     "GmailProvider",
     "IntegrationManager",
     "NotionProvider",
+    "TokenStoreError",
     "clear_all_user_tokens",
     "clear_token",
     "get_account_info",

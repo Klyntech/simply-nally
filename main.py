@@ -277,27 +277,32 @@ def handle_mcp(args) -> int:
     if cmd in ("status", "gmail-status"):
         from nally.config import MCP_ENABLED
         from nally.github_oauth import is_github_authenticated
+        from nally.integrations.token_store import get_valid_token
         from nally.mcp.adapter import _has_mcp as has_mcp_pkg
-        from nally.mcp.auth import (
-            DEFAULT_GMAIL_CACHE_FILE,
-            get_cached_token,
-            get_gmail_cached_token,
-            gmail_token_is_valid,
-            is_gmail_authenticated,
-            token_is_valid,
-        )
+
+        GMAIL_CACHE_FILE = "~/.config/simply-nally/tokens/_global/gmail.json"
+
+        def _gmail_is_connected():
+            import os
+            env = (os.getenv("GMAIL_TOKEN", "").strip()
+                   or os.getenv("GMAIL_OAUTH_TOKEN", "").strip()
+                   or os.getenv("GOOGLE_GMAIL_TOKEN", "").strip())
+            if env:
+                return True
+            return get_valid_token("_global", "gmail") is not None
+
+        def _gmail_cached_token():
+            return get_valid_token("_global", "gmail")
 
         if cmd == "gmail-status":
             print(f"Gmail MCP URL: {__import__('nally.config', fromlist=['GMAIL_MCP_URL']).GMAIL_MCP_URL}")
-            print(f"Gmail auth: {'yes' if is_gmail_authenticated() else 'no'}")
-            if gmail_token_is_valid():
-                tok = get_gmail_cached_token()
-                print(f"cached token: yes ({tok[:12]}…)" if tok else "cached token: yes")
-                print(f"cache: {DEFAULT_GMAIL_CACHE_FILE} (0600)")
+            print(f"Gmail auth: {'yes' if _gmail_is_connected() else 'no'}")
+            tok = _gmail_cached_token()
+            if tok:
+                print(f"cached token: yes ({tok[:12]})")
+                print(f"cache: {GMAIL_CACHE_FILE} (0600)")
             else:
-                # Check env fallback
                 import os as _os
-
                 has_env = bool(_os.getenv("GMAIL_TOKEN", "").strip() or _os.getenv("GMAIL_OAUTH_TOKEN", "").strip())
                 if has_env:
                     print("cached token: no (using GMAIL_TOKEN env)")
@@ -305,7 +310,6 @@ def handle_mcp(args) -> int:
                     print("cached token: no (run `python main.py mcp gmail-login` or set GMAIL_TOKEN)")
             try:
                 from nally.config import get_mcp_servers_config
-
                 cfg = get_mcp_servers_config()
                 gm = cfg.get("gmail") if cfg else None
                 if gm:
@@ -324,26 +328,24 @@ def handle_mcp(args) -> int:
         except Exception:
             print("mcp package: unknown")
         print(f"GitHub auth: {'yes' if is_github_authenticated() else 'no'}")
-        if token_is_valid():
-            print(f"  cached token: yes ({get_cached_token()[:12]}…)" if get_cached_token() else "  cached token: yes")
+        gh_tok = get_valid_token("_global", "github")
+        if gh_tok:
+            print(f"  cached token: yes ({gh_tok[:12]})")
         else:
             print("  cached token: no (run `python main.py mcp login`)")
-        print(f"Gmail auth: {'yes' if is_gmail_authenticated() else 'no'}")
-        if gmail_token_is_valid():
-            tok = get_gmail_cached_token()
-            print(f"  cached token: yes ({tok[:12]}…)" if tok else "  cached token: yes")
+        print(f"Gmail auth: {'yes' if _gmail_is_connected() else 'no'}")
+        tok = _gmail_cached_token()
+        if tok:
+            print(f"  cached token: yes ({tok[:12]})")
         else:
             import os as _os
-
             has_env = bool(_os.getenv("GMAIL_TOKEN", "").strip() or _os.getenv("GMAIL_OAUTH_TOKEN", "").strip())
             if has_env:
                 print("  cached token: no (using GMAIL_TOKEN env)")
             else:
                 print("  cached token: no (run `python main.py mcp gmail-login` or set GMAIL_TOKEN)")
-        # Also show transport
         try:
             from nally.config import get_mcp_servers_config
-
             cfg = get_mcp_servers_config()
             if cfg:
                 for name, c in cfg.items():
@@ -364,11 +366,11 @@ def handle_mcp(args) -> int:
         return 0
 
     if cmd in ("gmail-logout",):
-        from nally.mcp.auth import clear_gmail_token_cache
+        from nally.integrations.token_store import clear_token
 
-        if clear_gmail_token_cache():
+        if clear_token("_global", "gmail"):
             print("Cleared cached Gmail MCP token.")
-            print(f"Removed {__import__('nally.mcp.auth', fromlist=['DEFAULT_GMAIL_CACHE_FILE']).DEFAULT_GMAIL_CACHE_FILE}")
+            print("Removed ~/.config/simply-nally/tokens/_global/gmail.json")
         else:
             print("No cached Gmail token to clear.")
         return 0
@@ -444,9 +446,9 @@ def handle_mcp(args) -> int:
             return 2
         try:
             from google_auth_oauthlib.flow import InstalledAppFlow
+            from nally.integrations.token_store import write_token
 
-            from nally.mcp.auth import DEFAULT_GMAIL_CACHE_FILE, write_token_cache
-
+            GMAIL_CACHE_FILE = "~/.config/simply-nally/tokens/_global/gmail.json"
             cfg = {
                 "installed": {
                     "client_id": cid,
@@ -468,7 +470,6 @@ def handle_mcp(args) -> int:
                     access_type="offline",
                 )
             except AttributeError as exc:
-                # google_auth_oauthlib bug: last_request_uri is None after timeout → AttributeError on .replace
                 if "'NoneType' object has no attribute 'replace'" in str(exc) or "NoneType" in str(type(exc)):
                     raise RuntimeError(
                         "Browser authorization timed out (no request received for 3 minutes). "
@@ -479,7 +480,6 @@ def handle_mcp(args) -> int:
             access_token = getattr(creds, "token", None)
             if not access_token:
                 raise RuntimeError(f"No access token from flow: {creds}")
-            # expiry: creds.expiry is datetime or None
             expiry = getattr(creds, "expiry", None)
             if expiry is not None:
                 try:
@@ -488,34 +488,13 @@ def handle_mcp(args) -> int:
                     expires_at = time.time() + 3600
             else:
                 expires_at = time.time() + 3600
-            # Store refresh token if present for future auto-refresh (not yet used)
             refresh = getattr(creds, "refresh_token", None)
+            token_data = {"access_token": access_token, "expires_at": expires_at}
             if refresh:
-                # Persist alongside access token for future refresh support
-                # Our cache format currently only stores access_token + expires_at, but we can add refresh_token
-                import json as _json
-                from pathlib import Path as _Path
-
-                p = _Path(DEFAULT_GMAIL_CACHE_FILE).expanduser()
-                p.parent.mkdir(parents=True, exist_ok=True)
-                data = {"access_token": access_token, "expires_at": expires_at, "refresh_token": refresh}
-                tmp = p.with_suffix(".tmp")
-                tmp.write_text(_json.dumps(data), encoding="utf-8")
-                import contextlib as _ctx
-
-                with _ctx.suppress(Exception):
-                    import os as _os
-
-                    _os.chmod(tmp, 0o600)
-                tmp.replace(p)
-                with _ctx.suppress(Exception):
-                    import os as _os
-
-                    _os.chmod(p, 0o600)
-            else:
-                write_token_cache(access_token, expires_at, cache_file=DEFAULT_GMAIL_CACHE_FILE)
-            print(f"Gmail MCP login — token cached: {access_token[:12]}…")
-            print(f"Stored at {DEFAULT_GMAIL_CACHE_FILE} (0600), expires {int((expires_at - time.time())//60)} min")
+                token_data["refresh_token"] = refresh
+            write_token("_global", "gmail", token_data)
+            print(f"Gmail MCP login — token cached: {access_token[:12]}")
+            print(f"Stored at {GMAIL_CACHE_FILE} (0600), expires {int((expires_at - time.time())//60)} min")
             if refresh:
                 print("Refresh token saved — future sessions can auto-refresh (restart not needed).")
             else:

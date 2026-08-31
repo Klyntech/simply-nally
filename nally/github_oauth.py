@@ -1,21 +1,10 @@
 """GitHub OAuth for MCP — device flow (primary) + PKCE (experimental).
 
-Delegates token-cache handling to ``nally.mcp.auth`` (single source of
-truth for file I/O, permissions, and logging). This module remains
-GitHub-specific by design; generic MCP auth lives in ``nally.mcp.auth``.
+This module provides GitHub OAuth flows for CLI usage. The Telegram bot
+now uses nally.integrations.github.GitHubProvider instead.
 
-Device flow is the current Telegram UX:
-    github_request_device_code() -> user enters code -> github_poll_token()
-
-PKCE flow (authorization code) is experimental for local browser auth:
-    build_auth_url() -> browser -> callback -> _exchange_code()
-
-Stored token is plaintext JSON under ``~/.config/simply-nally/`` with
-``0o600`` (see ``nally.mcp.auth``). Documented limitation.
-
-Scope default is broad (``repo,read:user,workflow,…``) for the MCP
-experiment. Override via ``GITHUB_OAUTH_SCOPES`` env or ``scopes`` param
-for least-privilege deployments.
+Device flow: github_request_device_code() -> user enters code -> github_poll_token()
+PKCE flow (experimental): build_auth_url() -> browser -> callback -> _exchange_code()
 """
 
 from __future__ import annotations
@@ -29,57 +18,49 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import requests
 
-# Cache delegation — single place for file handling, logging, perms
-from nally.mcp.auth import (
-    DEFAULT_CACHE_FILE as _DEFAULT_CACHE_FILE,
-)
-from nally.mcp.auth import (
-    clear_token_cache as _clear_cache,
-)
-from nally.mcp.auth import (
-    get_cached_token as _auth_get_cached_token,
-)
-from nally.mcp.auth import (
-    read_token_cache as _auth_read_cache,
-)
-from nally.mcp.auth import (
-    token_is_valid as _auth_token_is_valid,
-)
-from nally.mcp.auth import (
-    write_token_cache as _auth_write_cache,
+from nally.integrations.token_store import (
+    get_valid_token,
+    read_token,
+    write_token,
 )
 
 # ---------------------------------------------------------------------------
-# Constants (keep for backwards compat)
+# Constants
 # ---------------------------------------------------------------------------
 GITHUB_DEVICE_CODE_URL = "https://github.com/login/device/code"
 GITHUB_TOKEN_URL = "https://github.com/login/oauth/access_token"
 GITHUB_AUTH_URL = "https://github.com/login/oauth/authorize"
 
-TOKEN_CACHE_FILE = _DEFAULT_CACHE_FILE
+# Legacy global cache path (used by CLI commands)
+LEGACY_CACHE_FILE = os.path.expanduser("~/.config/simply-nally/github_oauth_token.json")
 CALLBACK_PORT = 8080
 CALLBACK_URL = f"http://localhost:{CALLBACK_PORT}/callback"
 
+# Global user_id for CLI usage (no per-user isolation in CLI mode)
+_GLOBAL_USER_ID = "_global"
+
 
 # ---------------------------------------------------------------------------
-# Cache helpers — thin wrappers that remain patchable via os.* for tests
+# Cache helpers — delegate to token_store for consistency
 # ---------------------------------------------------------------------------
 def _read_token_cache() -> dict | None:
-    # Delegate to canonical impl (handles logging, corrupt JSON, etc.)
-    return _auth_read_cache()
+    return read_token(_GLOBAL_USER_ID, "github")
 
 
 def _write_token_cache(token: str, expires_at: float) -> None:
-    _auth_write_cache(token, expires_at)
+    write_token(_GLOBAL_USER_ID, "github", {
+        "access_token": token,
+        "expires_at": expires_at,
+    })
 
 
 def _token_is_valid() -> bool:
-    return _auth_token_is_valid()
+    return get_valid_token(_GLOBAL_USER_ID, "github") is not None
 
 
 def get_cached_token() -> str | None:
     """Return cached token if valid, else None."""
-    return _auth_get_cached_token()
+    return get_valid_token(_GLOBAL_USER_ID, "github")
 
 
 def is_github_authenticated() -> bool:
@@ -97,22 +78,10 @@ def is_github_authenticated() -> bool:
 
 
 def clear_github_token() -> bool:
-    """Remove cached token. Returns True if file was removed.
+    """Remove cached token. Returns True if removed."""
+    from nally.integrations.token_store import clear_token
 
-    Uses ``os.path.exists`` / ``os.remove`` so tests can patch them.
-    Falls back to ``nally.mcp.auth.clear_token_cache`` if needed.
-    """
-    try:
-        if os.path.exists(TOKEN_CACHE_FILE):
-            os.remove(TOKEN_CACHE_FILE)
-            return True
-        return False
-    except Exception:
-        # Fallback: try canonical clear (pathlib-based)
-        try:
-            return _clear_cache()
-        except Exception:
-            return False
+    return clear_token(_GLOBAL_USER_ID, "github")
 
 
 # ---------------------------------------------------------------------------
@@ -140,10 +109,7 @@ def _poll_token_response(
 
 
 def _handle_poll_result(tdata: dict, interval: int) -> tuple[str | None, int | None]:
-    """Inspect poll JSON.
-
-    Returns (token, sleep_seconds) or (None, sleep) or raises.
-    """
+    """Inspect poll JSON. Returns (token, sleep_seconds) or raises."""
     if "access_token" in tdata:
         return tdata["access_token"], None
 
@@ -193,11 +159,7 @@ def github_poll_token(
     expires_in: int = 900,
     interval: int = 5,
 ) -> str:
-    """Poll for GitHub access token. Blocking — run in thread if needed.
-
-    Uses shared poll handling so logic isn't duplicated with
-    ``get_github_token``.
-    """
+    """Poll for GitHub access token. Blocking — run in thread if needed."""
     cid = (client_id or os.getenv("GITHUB_CLIENT_ID", "")).strip()
     csec = (client_secret or os.getenv("GITHUB_CLIENT_SECRET", "")).strip()
     deadline = time.time() + expires_in
@@ -206,7 +168,6 @@ def github_poll_token(
 
         token, sleep_for = _handle_poll_result(tdata, interval)
         if token:
-            # Success — cache and return
             expires_at = time.time() + tdata.get("expires_in", 3600)
             _write_token_cache(token, expires_at)
             return token
@@ -224,17 +185,7 @@ async def get_github_token(
     scopes: str | None = None,
     timeout: int = 120,
 ) -> str:
-    """Get a GitHub access token via device flow.
-
-    Async entry point for Telegram UX. Blocks until user authorizes
-    (or timeout). Internally uses ``asyncio.sleep`` so it doesn't
-    block the event loop, but ``requests`` calls are still synchronous
-    and should ideally be run in a thread for production. For now we
-    keep ``requests`` for simplicity and use ``asyncio.sleep`` for
-    polling delays.
-
-    Timeout controls the overall wait (not just one poll). Default 120s.
-    """
+    """Get a GitHub access token via device flow (async)."""
     import asyncio
 
     cid = (client_id or os.getenv("GITHUB_CLIENT_ID", "")).strip()
@@ -255,7 +206,6 @@ async def get_github_token(
         or os.getenv("GITHUB_OAUTH_SCOPES", "repo,read:user,workflow,pull_requests,issues").strip()
     )
 
-    # Request device code (blocking, but short — run directly)
     resp = requests.post(
         GITHUB_DEVICE_CODE_URL,
         data={"client_id": cid, "scope": device_scopes},
@@ -271,7 +221,6 @@ async def get_github_token(
     expires_in = data.get("expires_in", 900)
     interval = data.get("interval", 5)
 
-    # Bound by both device expiry and caller timeout
     effective_timeout = min(expires_in, timeout) if timeout else expires_in
     print(f"\nGitHub OAuth: visit {verification_uri} and enter code: {user_code}")
     print(f"Waiting for authorization (expires in {effective_timeout}s)...\n")
@@ -287,8 +236,6 @@ async def get_github_token(
             print("GitHub OAuth: token obtained.\n")
             return token
         if sleep_for is not None:
-            # Use async sleep so event loop isn't blocked
-            # Cap sleep to remaining time
             remaining = deadline - time.time()
             if remaining <= 0:
                 break
@@ -322,7 +269,6 @@ def build_auth_url(
 ) -> str:
     """Build GitHub OAuth authorization URL for PKCE flow."""
     cid = (client_id or os.getenv("GITHUB_CLIENT_ID", "")).strip()
-    # Keep broad default but allow override for least-privilege
     default_scopes = "repo,read:user,workflow"
     device_scopes = (scopes or os.getenv("GITHUB_OAUTH_SCOPES", default_scopes)).strip()
     st = state or _state()
@@ -405,11 +351,7 @@ def get_github_token_via_pkce(
     scopes: str | None = None,
     timeout: int = 120,
 ) -> str:
-    """PKCE authorization-code flow (synchronous, browser-based).
-
-    Kept for reference / local dev. Do not call from async loop without
-    threading. For Telegram, use device flow (``get_github_token``).
-    """
+    """PKCE authorization-code flow (synchronous, browser-based)."""
     if _token_is_valid():
         tok = get_cached_token()
         if tok:

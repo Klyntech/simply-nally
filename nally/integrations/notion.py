@@ -7,6 +7,7 @@ auth URL, callback, and token exchange.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import threading
@@ -18,6 +19,7 @@ import requests
 
 from . import token_store
 from .base import BaseProvider
+from .token_store import TokenStoreError
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +42,6 @@ class NotionProvider(BaseProvider):
 
     async def connect(self, user_id: str) -> dict[str, Any]:
         """Start Notion PKCE flow. Returns auth_url + flow state."""
-        # Import from existing notion_oauth module for discovery/registration
         from nally.notion_oauth import (
             _REGISTRATION_ENDPOINT,
             _CallbackHandler,
@@ -104,8 +105,6 @@ class NotionProvider(BaseProvider):
 
     async def poll_connection(self, user_id: str, flow_data: dict[str, Any]) -> bool:
         """Wait for Notion callback to receive auth code."""
-        import asyncio
-
         from nally.notion_oauth import _CallbackHandler, _exchange_code
 
         server = flow_data.get("_server")
@@ -151,11 +150,17 @@ class NotionProvider(BaseProvider):
 
             # Fetch workspace info for display
             try:
-                token_data["account"] = self._fetch_workspace_name(tdata["access_token"])
+                token_data["account"] = await self._fetch_workspace_name(tdata["access_token"])
             except Exception:
                 token_data["account"] = "Notion workspace"
 
-            token_store.write_token(user_id, "notion", token_data)
+            try:
+                token_store.write_token(user_id, "notion", token_data)
+            except TokenStoreError as exc:
+                raise RuntimeError(
+                    f"Notion OAuth succeeded but NALLY could not save the credential: {exc}"
+                ) from exc
+
             logger.info("Notion token cached for user %s", user_id)
 
             # Reset callback state for next flow
@@ -169,9 +174,10 @@ class NotionProvider(BaseProvider):
             if server:
                 server.shutdown()
 
-    def _fetch_workspace_name(self, token: str) -> str:
+    async def _fetch_workspace_name(self, token: str) -> str:
         """Fetch Notion workspace name for display."""
-        resp = requests.get(
+        resp = await asyncio.to_thread(
+            requests.get,
             "https://api.notion.com/v1/users/me",
             headers={
                 "Authorization": f"Bearer {token}",
@@ -194,11 +200,9 @@ class NotionProvider(BaseProvider):
 
     def get_auth_headers(self, user_id: str) -> dict[str, str] | None:
         """Return Authorization header for MCP HTTP transport."""
-        # Per-user token
         token = token_store.get_valid_token(user_id, "notion")
         if token:
             return {"Authorization": f"Bearer {token}"}
-        # Fallback to env token
         env_token = os.getenv("NOTION_TOKEN", "").strip()
         if env_token:
             return {"Authorization": f"Bearer {env_token}"}

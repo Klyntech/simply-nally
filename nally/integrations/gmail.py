@@ -6,6 +6,7 @@ Scopes: gmail.readonly + gmail.compose for v1.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import time
@@ -15,6 +16,7 @@ import requests
 
 from . import token_store
 from .base import BaseProvider
+from .token_store import TokenStoreError
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +58,8 @@ class GmailProvider(BaseProvider):
 
         scopes = os.getenv("GMAIL_OAUTH_SCOPES", _SCOPES).strip()
 
-        resp = requests.post(
+        resp = await asyncio.to_thread(
+            requests.post,
             _DEVICE_CODE_URL,
             data={
                 "client_id": cid,
@@ -87,7 +90,8 @@ class GmailProvider(BaseProvider):
 
         deadline = time.time() + expires_in
         while time.time() < deadline:
-            resp = requests.post(
+            resp = await asyncio.to_thread(
+                requests.post,
                 _TOKEN_URL,
                 data={
                     "client_id": cid,
@@ -111,7 +115,8 @@ class GmailProvider(BaseProvider):
 
                 # Fetch email for display
                 try:
-                    token_resp = requests.get(
+                    token_resp = await asyncio.to_thread(
+                        requests.get,
                         "https://www.googleapis.com/oauth2/v3/userinfo",
                         headers={"Authorization": f"Bearer {tdata['access_token']}"},
                         timeout=10,
@@ -122,15 +127,21 @@ class GmailProvider(BaseProvider):
                 except Exception:
                     token_data["account"] = "Gmail user"
 
-                token_store.write_token(user_id, "gmail", token_data)
+                try:
+                    token_store.write_token(user_id, "gmail", token_data)
+                except TokenStoreError as exc:
+                    raise RuntimeError(
+                        f"Gmail OAuth succeeded but NALLY could not save the credential: {exc}"
+                    ) from exc
+
                 logger.info("Gmail token cached for user %s", user_id)
                 return True
 
             error = tdata.get("error", "")
             if error == "authorization_pending":
-                time.sleep(max(interval, 1))
+                await asyncio.sleep(max(interval, 1))
             elif error == "slow_down":
-                time.sleep(interval + 5)
+                await asyncio.sleep(interval + 5)
             elif error in ("expired_token", "access_denied"):
                 raise RuntimeError(f"Gmail OAuth failed: {error}")
             elif error:
@@ -150,11 +161,9 @@ class GmailProvider(BaseProvider):
 
     def get_auth_headers(self, user_id: str) -> dict[str, str] | None:
         """Return Authorization header for MCP HTTP transport."""
-        # Per-user token
         token = token_store.get_valid_token(user_id, "gmail")
         if token:
             return {"Authorization": f"Bearer {token}"}
-        # Fallback to env token
         env_token = (
             os.getenv("GMAIL_TOKEN", "").strip()
             or os.getenv("GMAIL_OAUTH_TOKEN", "").strip()

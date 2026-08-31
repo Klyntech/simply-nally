@@ -31,6 +31,20 @@ logger = logging.getLogger(__name__)
 _BASE_DIR = Path("~/.config/simply-nally/tokens").expanduser()
 
 
+class TokenStoreError(Exception):
+    """Raised when token storage operations fail."""
+
+
+def _validate_user_id(user_id: str) -> None:
+    """Validate user_id before using it as a filesystem path component."""
+    if not user_id or not isinstance(user_id, str):
+        raise TokenStoreError("user_id must be a non-empty string")
+    if len(user_id) > 128:
+        raise TokenStoreError(f"user_id too long: {len(user_id)} chars (max 128)")
+    if not all(c.isalnum() or c in "_-" for c in user_id):
+        raise TokenStoreError(f"user_id contains invalid characters: {user_id!r}")
+
+
 def _user_dir(user_id: str) -> Path:
     """Return directory for a user's tokens."""
     return _BASE_DIR / user_id
@@ -43,6 +57,7 @@ def _token_file(user_id: str, provider: str) -> Path:
 
 def read_token(user_id: str, provider: str) -> dict[str, Any] | None:
     """Read raw token data. Returns None on missing/invalid."""
+    _validate_user_id(user_id)
     p = _token_file(user_id, provider)
     try:
         if not p.exists():
@@ -61,7 +76,13 @@ def read_token(user_id: str, provider: str) -> dict[str, Any] | None:
 
 
 def write_token(user_id: str, provider: str, data: dict[str, Any]) -> None:
-    """Write token data atomically with restrictive permissions."""
+    """Write token data atomically with restrictive permissions.
+
+    Raises TokenStoreError on failure. Callers must handle this —
+    a failed write means the OAuth provider succeeded but NALLY
+    could not persist the credential.
+    """
+    _validate_user_id(user_id)
     p = _token_file(user_id, provider)
     try:
         p.parent.mkdir(parents=True, exist_ok=True)
@@ -73,13 +94,18 @@ def write_token(user_id: str, provider: str, data: dict[str, Any]) -> None:
         with contextlib.suppress(Exception):
             os.chmod(p, 0o600)
     except OSError as exc:
-        logger.warning("Cannot write token file at %s: %s", p, exc)
+        raise TokenStoreError(
+            f"Cannot write token for {user_id}/{provider}: {exc}"
+        ) from exc
     except Exception as exc:
-        logger.warning("Unexpected error writing token %s/%s: %s", user_id, provider, exc)
+        raise TokenStoreError(
+            f"Unexpected error writing token {user_id}/{provider}: {exc}"
+        ) from exc
 
 
 def clear_token(user_id: str, provider: str) -> bool:
     """Remove token file. Returns True if removed."""
+    _validate_user_id(user_id)
     p = _token_file(user_id, provider)
     try:
         if p.exists():
@@ -93,6 +119,7 @@ def clear_token(user_id: str, provider: str) -> bool:
 
 def get_valid_token(user_id: str, provider: str) -> str | None:
     """Return access_token if valid (not expired), else None."""
+    _validate_user_id(user_id)
     data = read_token(user_id, provider)
     if not data:
         return None
@@ -116,6 +143,7 @@ def token_is_valid(user_id: str, provider: str) -> bool:
 
 def get_account_info(user_id: str, provider: str) -> str | None:
     """Return stored account display name, or None."""
+    _validate_user_id(user_id)
     data = read_token(user_id, provider)
     if not data:
         return None
@@ -127,6 +155,7 @@ def get_account_info(user_id: str, provider: str) -> str | None:
 
 def clear_all_user_tokens(user_id: str) -> int:
     """Remove all tokens for a user. Returns count removed."""
+    _validate_user_id(user_id)
     d = _user_dir(user_id)
     if not d.exists():
         return 0

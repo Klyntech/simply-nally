@@ -317,11 +317,20 @@ class Runtime:
                 return IntegrationManager().is_connected(user_id, "gmail")
             except Exception:
                 return False
-        try:
-            from nally.mcp.auth import _DEFAULT_PROVIDERS
+        # Fallback: check env vars
+        import os
 
-            provider = _DEFAULT_PROVIDERS.get("gmail")
-            return bool(provider and provider.get_headers("gmail", {}))
+        env_token = (
+            os.getenv("GMAIL_TOKEN", "").strip()
+            or os.getenv("GMAIL_OAUTH_TOKEN", "").strip()
+            or os.getenv("GOOGLE_GMAIL_TOKEN", "").strip()
+        )
+        if env_token:
+            return True
+        try:
+            from nally.integrations.token_store import get_valid_token
+
+            return get_valid_token("_global", "gmail") is not None
         except Exception:
             return False
 
@@ -334,11 +343,16 @@ class Runtime:
                 return IntegrationManager().is_connected(user_id, "notion")
             except Exception:
                 return False
-        try:
-            from nally.mcp.auth import _DEFAULT_PROVIDERS
+        # Fallback: check env vars
+        import os
 
-            provider = _DEFAULT_PROVIDERS.get("notion")
-            return bool(provider and provider.get_headers("notion", {}))
+        env_token = os.getenv("NOTION_TOKEN", "").strip()
+        if env_token:
+            return True
+        try:
+            from nally.integrations.token_store import get_valid_token
+
+            return get_valid_token("_global", "notion") is not None
         except Exception:
             return False
 

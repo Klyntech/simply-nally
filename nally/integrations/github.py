@@ -1,11 +1,13 @@
 """GitHub integration — device flow OAuth.
 
-Default is read-only for v1. Write access requires explicit
-configuration via GITHUB_OAUTH_SCOPES env var.
+Default scopes grant full repository access (read + write for private repos).
+The "read-only" policy is enforced by convention, not by OAuth scope.
+Override via GITHUB_OAUTH_SCOPES env for least-privilege deployments.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import time
@@ -15,6 +17,7 @@ import requests
 
 from . import token_store
 from .base import BaseProvider
+from .token_store import TokenStoreError
 
 logger = logging.getLogger(__name__)
 
@@ -22,25 +25,27 @@ logger = logging.getLogger(__name__)
 _DEVICE_CODE_URL = "https://github.com/login/device/code"
 _TOKEN_URL = "https://github.com/login/oauth/access_token"
 
-# Default read-only scopes for v1
+# Default scopes for v1.
+# read:user — read user profile (read-only).
+# repo — full repository access (read + write for private repos).
+# The "read-only" policy is enforced by convention, not by OAuth scope.
+# Override via GITHUB_OAUTH_SCOPES env for least-privilege deployments.
 _DEFAULT_SCOPES = "read:user,repo"
 
 
 class GitHubProvider(BaseProvider):
-    """GitHub OAuth via device flow. Read-only by default."""
+    """GitHub OAuth via device flow. Read-only by convention."""
 
     PROVIDER_NAME = "github"
 
     def is_connected(self, user_id: str) -> bool:
         """Check global PAT or per-user cached token."""
-        # Global PAT (shared across all users)
         pat = (
             os.getenv("GITHUB_PERSONAL_ACCESS_TOKEN", "").strip()
             or os.getenv("GITHUB_TOKEN", "").strip()
         )
         if pat:
             return True
-        # Per-user cached token
         return token_store.get_valid_token(user_id, "github") is not None
 
     async def connect(self, user_id: str) -> dict[str, Any]:
@@ -55,7 +60,8 @@ class GitHubProvider(BaseProvider):
 
         scopes = os.getenv("GITHUB_OAUTH_SCOPES", _DEFAULT_SCOPES).strip()
 
-        resp = requests.post(
+        resp = await asyncio.to_thread(
+            requests.post,
             _DEVICE_CODE_URL,
             data={"client_id": cid, "scope": scopes},
             headers={"Accept": "application/json"},
@@ -83,7 +89,8 @@ class GitHubProvider(BaseProvider):
 
         deadline = time.time() + expires_in
         while time.time() < deadline:
-            resp = requests.post(
+            resp = await asyncio.to_thread(
+                requests.post,
                 _TOKEN_URL,
                 data={
                     "client_id": cid,
@@ -104,7 +111,8 @@ class GitHubProvider(BaseProvider):
                 }
                 # Fetch username for display
                 try:
-                    user_resp = requests.get(
+                    user_resp = await asyncio.to_thread(
+                        requests.get,
                         "https://api.github.com/user",
                         headers={
                             "Authorization": f"Bearer {tdata['access_token']}",
@@ -118,15 +126,21 @@ class GitHubProvider(BaseProvider):
                 except Exception:
                     pass
 
-                token_store.write_token(user_id, "github", token_data)
+                try:
+                    token_store.write_token(user_id, "github", token_data)
+                except TokenStoreError as exc:
+                    raise RuntimeError(
+                        f"GitHub OAuth succeeded but NALLY could not save the credential: {exc}"
+                    ) from exc
+
                 logger.info("GitHub token cached for user %s", user_id)
                 return True
 
             error = tdata.get("error", "")
             if error == "authorization_pending":
-                time.sleep(max(interval, 1))
+                await asyncio.sleep(max(interval, 1))
             elif error == "slow_down":
-                time.sleep(interval + 5)
+                await asyncio.sleep(interval + 5)
             elif error == "expired_token":
                 raise RuntimeError("GitHub device code expired. Please retry.")
             elif error == "access_denied":
@@ -144,16 +158,13 @@ class GitHubProvider(BaseProvider):
 
     def get_account_info(self, user_id: str) -> str | None:
         """Return GitHub username or None."""
-        # Global PAT has no stored account info
         return token_store.get_account_info(user_id, "github")
 
     def get_auth_headers(self, user_id: str) -> dict[str, str] | None:
         """Return Authorization header for MCP HTTP transport."""
-        # Check per-user token first
         token = token_store.get_valid_token(user_id, "github")
         if token:
             return {"Authorization": f"Bearer {token}"}
-        # Fallback to global PAT
         pat = (
             os.getenv("GITHUB_PERSONAL_ACCESS_TOKEN", "").strip()
             or os.getenv("GITHUB_TOKEN", "").strip()
