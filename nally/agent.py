@@ -1,8 +1,8 @@
 """Simply NALLY agent — the smallest reliable loop.
 
 Flow:
-  user message -> append -> LLM (with tools) -> tool_calls? -> validate -> execute -> append results -> loop
-  No LangGraph, no memory, no guardrails. Just a while loop that works.
+  user message -> retrieve memories -> append -> LLM (with tools) -> tool_calls? -> validate -> execute -> append results -> loop
+  No LangGraph, no guardrails. Just a while loop that works.
 """
 
 from __future__ import annotations
@@ -35,7 +35,6 @@ class Agent:
         on_tool_start: Any | None = None,
     ) -> None:
         self.llm: LLMClient = llm_client or default_client
-        self.registry: ToolRegistry = registry or build_default_registry()
         self.max_iterations = max_iterations if max_iterations is not None else MAX_ITERATIONS
         self.max_tool_calls = max_tool_calls if max_tool_calls is not None else MAX_TOOL_CALLS
         self.on_tool_start = on_tool_start
@@ -49,15 +48,67 @@ class Agent:
                 default_model=getattr(self.llm, "model", None),
             )
 
+        # Build registry with user_id if available (enables memory tools)
+        user_id = self._get_user_id()
+        if registry is not None:
+            self.registry = registry
+        else:
+            self.registry = build_default_registry(user_id=user_id)
+
+        # Memory manager for dynamic retrieval (lazy init)
+        self._memory_manager: Any | None = None
+        if user_id:
+            try:
+                from .memory.manager import MemoryManager
+                self._memory_manager = MemoryManager(user_id)
+            except Exception:
+                pass
+
     @property
     def messages(self) -> list[dict[str, Any]]:
         return self.conversation.get_messages()
+
+    def _get_user_id(self) -> str | None:
+        """Extract user_id from conversation's session store."""
+        store = getattr(self.conversation, "_session_store", None)
+        if store is not None:
+            return getattr(store, "user_id", None)
+        return None
+
+    def _build_messages_with_memory(self, user_input: str) -> list[dict[str, Any]]:
+        """Build message list with relevant memories injected into system prompt.
+
+        Dynamic retrieval: only relevant memories are included, not all memories.
+        """
+        messages = self.conversation.get_messages()
+        if self._memory_manager is None:
+            return messages
+
+        # Get relevant memories for this user message
+        context_block = self._memory_manager.build_context_block(user_input)
+        if not context_block:
+            return messages
+
+        # Inject into the system prompt (first message)
+        if messages and messages[0].get("role") == "system":
+            enriched = dict(messages[0])
+            enriched["content"] = enriched["content"] + "\n\n" + context_block
+            return [enriched, *messages[1:]]
+
+        # No system prompt — prepend one with memory context
+        return [{"role": "system", "content": context_block}, *messages]
 
     # ------------------------------------------------------------------ public
     def run(self, user_input: str) -> str:
         """Process a user message and return the final assistant response."""
         if not user_input or not user_input.strip():
             return "Please provide a message."
+
+        # Check for explicit memory commands first
+        if self._memory_manager is not None:
+            cmd_response = self._memory_manager.handle_memory_command(user_input)
+            if cmd_response is not None:
+                return cmd_response
 
         user_msg: dict[str, Any] = {"role": "user", "content": user_input}
         self.conversation.append(user_msg)
@@ -72,10 +123,13 @@ class Agent:
                     f"Partial progress saved in history."
                 )
 
+            # Build messages with dynamic memory context
+            messages = self._build_messages_with_memory(user_input)
+
             # Call LLM
             try:
                 response = self.llm.chat(
-                    messages=self.conversation.get_messages(),
+                    messages=messages,
                     tools=self.registry.all_schemas() or None,
                 )
             except LLMError as exc:
@@ -96,9 +150,10 @@ class Agent:
                     self.conversation.append(
                         {"role": "user", "content": "(You must respond to the user.)"}
                     )
+                    retry_messages = self._build_messages_with_memory(user_input)
                     try:
                         response = self.llm.chat(
-                            messages=self.conversation.get_messages(),
+                            messages=retry_messages,
                             tools=self.registry.all_schemas() or None,
                         )
                         choice = response.choices[0]

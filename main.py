@@ -77,12 +77,15 @@ def build_parser() -> argparse.ArgumentParser:
     tg_p.add_argument("--token", default=None, help="Override TELEGRAM_BOT_TOKEN")
     tg_p.add_argument("--drop-pending", action="store_true", help="Drop pending updates on start")
 
-    # ---- mcp (permanent GitHub device flow) ----
-    mcp_p = sub.add_parser("mcp", help="MCP GitHub auth (permanent device flow)")
+    # ---- mcp (permanent GitHub device flow + Gmail) ----
+    mcp_p = sub.add_parser("mcp", help="MCP auth — GitHub device flow + Gmail (Google official MCP)")
     mcp_sub = mcp_p.add_subparsers(dest="mcp_command")
-    mcp_sub.add_parser("status", help="Show MCP status + GitHub auth")
+    mcp_sub.add_parser("status", help="Show MCP status + GitHub/Gmail auth")
     mcp_sub.add_parser("login", help="Login to GitHub via device flow (permanent)")
     mcp_sub.add_parser("logout", help="Clear cached GitHub MCP token")
+    mcp_sub.add_parser("gmail-login", help="Login to Gmail via Google OAuth (for Gmail MCP)")
+    mcp_sub.add_parser("gmail-logout", help="Clear cached Gmail MCP token")
+    mcp_sub.add_parser("gmail-status", help="Show Gmail MCP status only")
 
     # Also include chat flags so `main.py auth --help` doesn't confuse, and top-level --help lists them
     p.add_argument("--model", default=None, help=argparse.SUPPRESS)
@@ -224,7 +227,7 @@ def handle_auth(args) -> int:
         print(f"db_configured: {db_mod.is_configured()}")
         if db_mod.is_configured():
             try:
-                conn = db_mod.connect()
+                conn = db_mod.pooled_connect()
                 try:
                     db_mod.init_schema(conn)
                     print("db_schema: ok")
@@ -254,7 +257,7 @@ def handle_auth(args) -> int:
             print("DATABASE_URL not set", file=sys.stderr)
             return 2
         try:
-            conn = db_mod.connect()
+            conn = db_mod.pooled_connect()
             try:
                 db_mod.init_schema(conn)
                 print("Schema initialized.")
@@ -268,15 +271,52 @@ def handle_auth(args) -> int:
 
 
 def handle_mcp(args) -> int:
-    """Permanent GitHub MCP device-flow auth (mirrors Telegram /mcp)."""
+    """MCP auth — GitHub device flow + Gmail Google OAuth (no npm/npx)."""
     cmd = getattr(args, "mcp_command", None) or "status"
 
-    if cmd == "status":
+    if cmd in ("status", "gmail-status"):
         from nally.config import MCP_ENABLED
         from nally.github_oauth import is_github_authenticated
         from nally.mcp.adapter import _has_mcp as has_mcp_pkg
-        from nally.mcp.auth import get_cached_token, token_is_valid
+        from nally.mcp.auth import (
+            DEFAULT_GMAIL_CACHE_FILE,
+            get_cached_token,
+            get_gmail_cached_token,
+            gmail_token_is_valid,
+            is_gmail_authenticated,
+            token_is_valid,
+        )
 
+        if cmd == "gmail-status":
+            print(f"Gmail MCP URL: {__import__('nally.config', fromlist=['GMAIL_MCP_URL']).GMAIL_MCP_URL}")
+            print(f"Gmail auth: {'yes' if is_gmail_authenticated() else 'no'}")
+            if gmail_token_is_valid():
+                tok = get_gmail_cached_token()
+                print(f"cached token: yes ({tok[:12]}…)" if tok else "cached token: yes")
+                print(f"cache: {DEFAULT_GMAIL_CACHE_FILE} (0600)")
+            else:
+                # Check env fallback
+                import os as _os
+
+                has_env = bool(_os.getenv("GMAIL_TOKEN", "").strip() or _os.getenv("GMAIL_OAUTH_TOKEN", "").strip())
+                if has_env:
+                    print("cached token: no (using GMAIL_TOKEN env)")
+                else:
+                    print("cached token: no (run `python main.py mcp gmail-login` or set GMAIL_TOKEN)")
+            try:
+                from nally.config import get_mcp_servers_config
+
+                cfg = get_mcp_servers_config()
+                gm = cfg.get("gmail") if cfg else None
+                if gm:
+                    print(f"server gmail: {gm}")
+                elif not cfg:
+                    print("servers: none (check NALLY_MCP_ENABLED)")
+            except Exception as exc:
+                print(f"servers error: {exc}")
+            return 0
+
+        # full status
         print(f"MCP enabled: {MCP_ENABLED}")
         try:
             status = "installed" if has_mcp_pkg() else 'not installed (pip install "simply-nally[mcp]")'
@@ -285,12 +325,25 @@ def handle_mcp(args) -> int:
             print("mcp package: unknown")
         print(f"GitHub auth: {'yes' if is_github_authenticated() else 'no'}")
         if token_is_valid():
-            print(f"cached token: yes ({get_cached_token()[:12]}…)" if get_cached_token() else "cached token: yes")
+            print(f"  cached token: yes ({get_cached_token()[:12]}…)" if get_cached_token() else "  cached token: yes")
         else:
-            print("cached token: no (run `python main.py mcp login`)")
+            print("  cached token: no (run `python main.py mcp login`)")
+        print(f"Gmail auth: {'yes' if is_gmail_authenticated() else 'no'}")
+        if gmail_token_is_valid():
+            tok = get_gmail_cached_token()
+            print(f"  cached token: yes ({tok[:12]}…)" if tok else "  cached token: yes")
+        else:
+            import os as _os
+
+            has_env = bool(_os.getenv("GMAIL_TOKEN", "").strip() or _os.getenv("GMAIL_OAUTH_TOKEN", "").strip())
+            if has_env:
+                print("  cached token: no (using GMAIL_TOKEN env)")
+            else:
+                print("  cached token: no (run `python main.py mcp gmail-login` or set GMAIL_TOKEN)")
         # Also show transport
         try:
             from nally.config import get_mcp_servers_config
+
             cfg = get_mcp_servers_config()
             if cfg:
                 for name, c in cfg.items():
@@ -308,6 +361,16 @@ def handle_mcp(args) -> int:
             print("Cleared cached GitHub MCP token.")
         else:
             print("No cached token to clear.")
+        return 0
+
+    if cmd in ("gmail-logout",):
+        from nally.mcp.auth import clear_gmail_token_cache
+
+        if clear_gmail_token_cache():
+            print("Cleared cached Gmail MCP token.")
+            print(f"Removed {__import__('nally.mcp.auth', fromlist=['DEFAULT_GMAIL_CACHE_FILE']).DEFAULT_GMAIL_CACHE_FILE}")
+        else:
+            print("No cached Gmail token to clear.")
         return 0
 
     if cmd == "login":
@@ -348,6 +411,128 @@ def handle_mcp(args) -> int:
             return 130
         except Exception as exc:
             print(f"Login error: {type(exc).__name__}: {exc}", file=sys.stderr)
+            return 1
+
+    if cmd == "gmail-login":
+        import os
+        import time
+
+        # Gmail uses browser (Desktop) flow — Device flow does NOT allow gmail scopes (invalid_scope)
+        # Try Gmail-specific OAuth first, then fallback to the main Google Desktop client
+        cid = os.getenv("GMAIL_CLIENT_ID", "").strip() or os.getenv("GOOGLE_CLIENT_ID", "").strip()
+        csec = os.getenv("GMAIL_CLIENT_SECRET", "").strip() or os.getenv("GOOGLE_CLIENT_SECRET", "").strip()
+        scopes = os.getenv("GMAIL_OAUTH_SCOPES", "").strip()
+        if not scopes:
+            from nally.config import GMAIL_OAUTH_SCOPES as _def_scopes
+
+            scopes = _def_scopes
+        scopes_list = [s.strip() for s in scopes.split() if s.strip()]
+        # Ensure openid/email are present so we could fetch userinfo if needed
+        if "openid" not in scopes_list:
+            scopes_list = ["openid", "https://www.googleapis.com/auth/userinfo.email"] + scopes_list
+        if not cid or not csec:
+            print("Config error: GMAIL_CLIENT_ID and GMAIL_CLIENT_SECRET not set", file=sys.stderr)
+            print("Hint: create a Google Cloud OAuth client (Desktop app) for Gmail", file=sys.stderr)
+            print("  1. Go to https://console.cloud.google.com/apis/credentials", file=sys.stderr)
+            print("  2. Create OAuth client → Desktop app (or reuse GOOGLE_CLIENT_ID if same project)", file=sys.stderr)
+            print("  3. Enable Gmail API + gmailmcp.googleapis.com in the project", file=sys.stderr)
+            print("  4. Add scopes gmail.readonly + gmail.compose to the consent screen", file=sys.stderr)
+            print("  5. Set GMAIL_CLIENT_ID and GMAIL_CLIENT_SECRET in .env (or set GOOGLE_CLIENT_ID)", file=sys.stderr)
+            print("", file=sys.stderr)
+            print("Alternative (no OAuth app): set GMAIL_TOKEN env to a Google OAuth access token", file=sys.stderr)
+            print("  with gmail.readonly + gmail.compose scopes (from gcloud auth or OAuth playground).", file=sys.stderr)
+            return 2
+        try:
+            from google_auth_oauthlib.flow import InstalledAppFlow
+
+            from nally.mcp.auth import DEFAULT_GMAIL_CACHE_FILE, write_token_cache
+
+            cfg = {
+                "installed": {
+                    "client_id": cid,
+                    "client_secret": csec,
+                    "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                    "token_uri": "https://oauth2.googleapis.com/token",
+                    "redirect_uris": ["http://localhost"],
+                }
+            }
+            flow = InstalledAppFlow.from_client_config(cfg, scopes=scopes_list)
+            print("Opening browser for Gmail OAuth (scopes: gmail.readonly, gmail.compose)…")
+            print("If browser doesn't open, copy the URL printed below (you have 3 minutes).")
+            try:
+                creds = flow.run_local_server(
+                    port=0,
+                    open_browser=True,
+                    timeout_seconds=180,
+                    prompt="consent",
+                    access_type="offline",
+                )
+            except AttributeError as exc:
+                # google_auth_oauthlib bug: last_request_uri is None after timeout → AttributeError on .replace
+                if "'NoneType' object has no attribute 'replace'" in str(exc) or "NoneType" in str(type(exc)):
+                    raise RuntimeError(
+                        "Browser authorization timed out (no request received for 3 minutes). "
+                        "Please run `python main.py mcp gmail-login` again and visit the URL promptly, "
+                        "complete Google consent, and allow the localhost redirect."
+                    ) from exc
+                raise
+            access_token = getattr(creds, "token", None)
+            if not access_token:
+                raise RuntimeError(f"No access token from flow: {creds}")
+            # expiry: creds.expiry is datetime or None
+            expiry = getattr(creds, "expiry", None)
+            if expiry is not None:
+                try:
+                    expires_at = expiry.timestamp()  # type: ignore[union-attr]
+                except Exception:
+                    expires_at = time.time() + 3600
+            else:
+                expires_at = time.time() + 3600
+            # Store refresh token if present for future auto-refresh (not yet used)
+            refresh = getattr(creds, "refresh_token", None)
+            if refresh:
+                # Persist alongside access token for future refresh support
+                # Our cache format currently only stores access_token + expires_at, but we can add refresh_token
+                import json as _json
+                from pathlib import Path as _Path
+
+                p = _Path(DEFAULT_GMAIL_CACHE_FILE).expanduser()
+                p.parent.mkdir(parents=True, exist_ok=True)
+                data = {"access_token": access_token, "expires_at": expires_at, "refresh_token": refresh}
+                tmp = p.with_suffix(".tmp")
+                tmp.write_text(_json.dumps(data), encoding="utf-8")
+                import contextlib as _ctx
+
+                with _ctx.suppress(Exception):
+                    import os as _os
+
+                    _os.chmod(tmp, 0o600)
+                tmp.replace(p)
+                with _ctx.suppress(Exception):
+                    import os as _os
+
+                    _os.chmod(p, 0o600)
+            else:
+                write_token_cache(access_token, expires_at, cache_file=DEFAULT_GMAIL_CACHE_FILE)
+            print(f"Gmail MCP login — token cached: {access_token[:12]}…")
+            print(f"Stored at {DEFAULT_GMAIL_CACHE_FILE} (0600), expires {int((expires_at - time.time())//60)} min")
+            if refresh:
+                print("Refresh token saved — future sessions can auto-refresh (restart not needed).")
+            else:
+                print("Note: no refresh token (already consented). Re-run if token expires in 1h.")
+            print("Gmail tools will be available after restart (if NALLY_MCP_ENABLED=true).")
+            return 0
+        except ImportError as exc:
+            print(f"Missing dep: {exc}. Run: pip install google-auth google-auth-oauthlib requests", file=sys.stderr)
+            return 1
+        except RuntimeError as exc:
+            print(f"Gmail login failed: {exc}", file=sys.stderr)
+            return 1
+        except KeyboardInterrupt:
+            print("\nCancelled.", file=sys.stderr)
+            return 130
+        except Exception as exc:
+            print(f"Gmail login error: {type(exc).__name__}: {exc}", file=sys.stderr)
             return 1
 
     return 2
@@ -425,7 +610,7 @@ def main(argv: list[str] | None = None) -> int:
                 from nally import db as db_mod
 
                 if db_mod.is_configured():
-                    conn = db_mod.connect()
+                    conn = db_mod.pooled_connect()
                     try:
                         db_mod.init_schema(conn)
                     finally:
@@ -462,7 +647,8 @@ def main(argv: list[str] | None = None) -> int:
         chat_p.print_help()
         print("\nSubcommands:")
         print("  auth login|logout|status|init-db   Google OAuth + NEON")
-        print("  mcp status|login|logout            GitHub MCP (permanent device flow)")
+        print("  mcp status|login|logout|gmail-login|gmail-logout|gmail-status")
+        print("                                     GitHub (device flow) + Gmail (Google MCP, no npm)")
         print("  history [--json] [--limit N]        Show persisted history")
         print("  clear                               Clear persisted history")
         print("  telegram [--token TOKEN]            Run Telegram bot (polling)")

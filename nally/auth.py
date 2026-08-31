@@ -234,7 +234,7 @@ def login_with_browser(*, open_browser: bool = True, timeout_seconds: int = 120)
             "DATABASE_URL not set — cannot persist user. Set NEON connection string in .env"
         )
 
-    conn = db.connect()
+    conn = db.pooled_connect()
     try:
         db.init_schema(conn)
         user = db.upsert_user(conn, google_id=google_id, email=email, name=name, picture=picture)
@@ -431,7 +431,7 @@ def link_telegram_to_google(
 
     if not db.is_configured():
         raise RuntimeError("DATABASE_URL not set")
-    conn = db.connect()
+    conn = db.pooled_connect()
     try:
         db.init_schema(conn)
         # Check if telegram already linked to someone
@@ -470,7 +470,7 @@ def ensure_user_and_session() -> dict[str, Any] | None:
     if not db.is_configured():
         return None
     try:
-        conn = db.connect()
+        conn = db.pooled_connect()
         try:
             user = db.get_user_by_id(conn, auth["user_id"])
             if user is None:

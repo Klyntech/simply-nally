@@ -11,7 +11,10 @@ and the Agent runs in-memory only (no crash).
 
 from __future__ import annotations
 
+import logging
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 def is_persistence_enabled() -> bool:
@@ -36,25 +39,26 @@ def get_session_store() -> SessionStore | None:
             return None
         if not db_mod.is_configured():
             return None
-        # Ensure session exists and load its id
-        conn = db_mod.connect()
+        conn = db_mod.pooled_connect()
         try:
             user = db_mod.get_user_by_id(conn, auth_data["user_id"])
             if user is None:
                 return None
             session = db_mod.get_or_create_session(conn, user["id"])
-            return SessionStore(session_id=session["id"])
+            return SessionStore(session_id=session["id"], user_id=user["id"])
         finally:
             conn.close()
-    except Exception:
+    except Exception as exc:
+        logger.debug("get_session_store failed: %s", exc)
         return None
 
 
 class SessionStore:
-    """Thin wrapper around nally.db that knows the session_id."""
+    """Thin wrapper around nally.db that knows the session_id and user_id."""
 
-    def __init__(self, session_id: str) -> None:
+    def __init__(self, session_id: str, user_id: str | None = None) -> None:
         self.session_id = session_id
+        self.user_id = user_id
 
     # ------------------------------------------------------------------ load
     def load(self) -> list[dict[str, Any]]:
@@ -62,24 +66,26 @@ class SessionStore:
         try:
             from . import db as db_mod
 
-            conn = db_mod.connect()
+            conn = db_mod.pooled_connect()
             try:
                 return db_mod.load_messages(conn, self.session_id)
             finally:
                 conn.close()
-        except Exception:
+        except Exception as exc:
+            logger.debug("SessionStore.load failed: %s", exc)
             return []
 
     def load_with_meta(self) -> list[dict[str, Any]]:
         try:
             from . import db as db_mod
 
-            conn = db_mod.connect()
+            conn = db_mod.pooled_connect()
             try:
                 return db_mod.load_messages_with_meta(conn, self.session_id)
             finally:
                 conn.close()
-        except Exception:
+        except Exception as exc:
+            logger.debug("SessionStore.load_with_meta failed: %s", exc)
             return []
 
     def has_messages(self) -> bool:
@@ -89,12 +95,13 @@ class SessionStore:
         try:
             from . import db as db_mod
 
-            conn = db_mod.connect()
+            conn = db_mod.pooled_connect()
             try:
                 return db_mod.get_session(conn, self.session_id)
             finally:
                 conn.close()
-        except Exception:
+        except Exception as exc:
+            logger.debug("SessionStore.info failed: %s", exc)
             return None
 
     # ------------------------------------------------------------------ append
@@ -111,7 +118,7 @@ class SessionStore:
         try:
             from . import db as db_mod
 
-            conn = db_mod.connect()
+            conn = db_mod.pooled_connect()
             try:
                 db_mod.append_message(
                     conn,
@@ -125,7 +132,8 @@ class SessionStore:
             finally:
                 conn.close()
             return True
-        except Exception:
+        except Exception as exc:
+            logger.debug("SessionStore.append failed: %s", exc)
             return False
 
     # ------------------------------------------------------------------ clear
@@ -134,7 +142,7 @@ class SessionStore:
         try:
             from . import db as db_mod
 
-            conn = db_mod.connect()
+            conn = db_mod.pooled_connect()
             try:
                 db_mod.clear_messages(conn, self.session_id)
                 if keep_system_prompt is not None:
@@ -144,14 +152,15 @@ class SessionStore:
             finally:
                 conn.close()
             return True
-        except Exception:
+        except Exception as exc:
+            logger.debug("SessionStore.clear failed: %s", exc)
             return False
 
     def count(self) -> int:
         try:
             from . import db as db_mod
 
-            conn = db_mod.connect()
+            conn = db_mod.pooled_connect()
             try:
                 with conn.cursor() as cur:
                     cur.execute(
@@ -161,5 +170,6 @@ class SessionStore:
                     return int(n)
             finally:
                 conn.close()
-        except Exception:
+        except Exception as exc:
+            logger.debug("SessionStore.count failed: %s", exc)
             return 0

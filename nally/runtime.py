@@ -101,13 +101,13 @@ class Runtime:
 
             if not db.is_configured():
                 return None
-            conn = db.connect()
+            conn = db.pooled_connect()
             try:
                 user = db.get_user_by_telegram_id(conn, str(telegram_user_id))
                 if user is None:
                     return None
                 sess = db.get_or_create_session(conn, user["id"])
-                return SessionStore(session_id=sess["id"])
+                return SessionStore(session_id=sess["id"], user_id=user["id"])
             finally:
                 conn.close()
         except Exception as exc:
@@ -123,7 +123,7 @@ class Runtime:
 
             if not db.is_configured():
                 return False
-            conn = db.connect()
+            conn = db.pooled_connect()
             try:
                 user = db.get_user_by_telegram_id(conn, telegram_user_id)
                 return user is not None
@@ -140,7 +140,7 @@ class Runtime:
 
             if not db.is_configured():
                 return None
-            conn = db.connect()
+            conn = db.pooled_connect()
             try:
                 return db.get_user_by_telegram_id(conn, telegram_user_id)
             finally:
@@ -165,7 +165,7 @@ class Runtime:
             return status
 
         try:
-            conn = db.connect()
+            conn = db.pooled_connect()
             try:
                 user = db.get_user_by_telegram_id(conn, telegram_id)
                 if user is None:
@@ -215,13 +215,13 @@ class Runtime:
 
             if not db.is_configured():
                 return False
-            conn = db.connect()
+            conn = db.pooled_connect()
             try:
                 user = db.get_user_by_telegram_id(conn, telegram_user_id)
                 if user is None:
                     return False
                 sess = db.get_or_create_session(conn, user["id"])
-                store = SessionStore(session_id=sess["id"])
+                store = SessionStore(session_id=sess["id"], user_id=user["id"])
                 store.clear(keep_system_prompt=get_system_prompt())
                 return True
             finally:
@@ -237,7 +237,7 @@ class Runtime:
 
             if not db.is_configured():
                 return False
-            conn = db.connect()
+            conn = db.pooled_connect()
             try:
                 ok = db.unlink_telegram(conn, telegram_user_id)
                 return ok
@@ -274,6 +274,13 @@ class Runtime:
         except Exception:
             result["github_authenticated"] = False
 
+        try:
+            from nally.mcp.auth import is_gmail_authenticated
+
+            result["gmail_authenticated"] = is_gmail_authenticated()
+        except Exception:
+            result["gmail_authenticated"] = False
+
         return result
 
     def is_github_authenticated(self) -> bool:
@@ -282,6 +289,15 @@ class Runtime:
             from nally.github_oauth import is_github_authenticated
 
             return is_github_authenticated()
+        except Exception:
+            return False
+
+    def is_gmail_authenticated(self) -> bool:
+        """Check if Gmail is authenticated for MCP."""
+        try:
+            from nally.mcp.auth import is_gmail_authenticated as _is_gmail
+
+            return _is_gmail()
         except Exception:
             return False
 

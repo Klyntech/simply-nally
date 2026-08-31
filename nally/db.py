@@ -1,6 +1,7 @@
-"""NEON Postgres session persistence — single source of truth.
+"""NEON Postgres persistence — single source of truth.
 
 One session per user (v1). Every message + tool result is persisted.
+Memory layer stores explicit user facts/preferences.
 
 Graceful fallback: if DATABASE_URL is not set or psycopg is missing,
 all functions return None/[] and the agent runs in-memory only.
@@ -9,7 +10,9 @@ all functions return None/[] and the agent runs in-memory only.
 from __future__ import annotations
 
 import json
+import logging
 import os
+import re
 from typing import Any
 
 try:
@@ -19,9 +22,13 @@ try:
 except ImportError:
     pass
 
+logger = logging.getLogger(__name__)
+
 # ---------------------------------------------------------------------------
 # Connection helpers
 # ---------------------------------------------------------------------------
+
+_pool: Any = None
 
 
 def get_database_url() -> str:
@@ -37,8 +44,28 @@ def is_configured() -> bool:
     return bool(get_database_url())
 
 
+def _get_pool():
+    """Return the application-level connection pool, creating it lazily."""
+    global _pool
+    if _pool is not None:
+        return _pool
+    url = get_database_url()
+    if not url:
+        return None
+    try:
+        from psycopg_pool import ConnectionPool  # type: ignore
+    except ImportError as exc:
+        logger.warning("psycopg_pool not installed, falling back to raw connections: %s", exc)
+        return None
+    _pool = ConnectionPool(url, min_size=1, max_size=5, check=ConnectionPool.check_connection)
+    return _pool
+
+
 def connect():
-    """Open a psycopg (v3) connection. Raises if not configured or driver missing."""
+    """Open a psycopg (v3) connection. Raises if not configured or driver missing.
+
+    Prefer pooled_connect() for new code.
+    """
     url = get_database_url()
     if not url:
         raise RuntimeError("DATABASE_URL not set — persistence disabled")
@@ -46,8 +73,23 @@ def connect():
         import psycopg  # type: ignore
     except ImportError as exc:
         raise RuntimeError('psycopg not installed. Run: pip install "psycopg[binary]"') from exc
-    # NEON requires sslmode=require (usually already in URL)
     return psycopg.connect(url)
+
+
+def pooled_connect():
+    """Get a connection from the pool. Falls back to raw connect() if pool unavailable."""
+    pool = _get_pool()
+    if pool is not None:
+        return pool.connection()
+    return connect()
+
+
+def close_pool() -> None:
+    """Shutdown the connection pool. Safe to call multiple times."""
+    global _pool
+    if _pool is not None:
+        _pool.close()
+        _pool = None
 
 
 # ---------------------------------------------------------------------------
@@ -97,6 +139,23 @@ CREATE TABLE IF NOT EXISTS messages (
 
 CREATE INDEX IF NOT EXISTS idx_messages_session_seq ON messages(session_id, seq);
 CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id);
+
+CREATE TABLE IF NOT EXISTS facts (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    type TEXT NOT NULL CHECK (type IN ('preference','fact','instruction','profile','project')),
+    key TEXT NOT NULL,
+    value TEXT NOT NULL,
+    source TEXT NOT NULL DEFAULT 'user',
+    confidence REAL NOT NULL DEFAULT 1.0,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (user_id, key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_facts_user_id ON facts(user_id);
+CREATE INDEX IF NOT EXISTS idx_facts_user_type ON facts(user_id, type);
+CREATE INDEX IF NOT EXISTS idx_facts_user_key ON facts(user_id, key);
 """
 
 
@@ -131,18 +190,53 @@ def _migrate_add_telegram(conn) -> None:
         conn.commit()
 
 
+def _migrate_add_facts(conn) -> None:
+    """Idempotent migration: create facts table for memory layer."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT 1 FROM information_schema.tables
+            WHERE table_name = 'facts'
+            """
+        )
+        if cur.fetchone() is None:
+            cur.execute(
+                """
+                CREATE TABLE facts (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    type TEXT NOT NULL CHECK (type IN ('preference','fact','instruction','profile','project')),
+                    key TEXT NOT NULL,
+                    value TEXT NOT NULL,
+                    source TEXT NOT NULL DEFAULT 'user',
+                    confidence REAL NOT NULL DEFAULT 1.0,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    UNIQUE (user_id, key)
+                )
+                """
+            )
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_facts_user_id ON facts(user_id)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_facts_user_type ON facts(user_id, type)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_facts_user_key ON facts(user_id, key)")
+            conn.commit()
+
+
 def init_schema(conn=None) -> None:
     """Create tables if they do not exist. Safe to call multiple times."""
     close = False
     if conn is None:
-        conn = connect()
+        try:
+            conn = pooled_connect()
+        except Exception:
+            conn = connect()
         close = True
     try:
         with conn.cursor() as cur:
             cur.execute(SCHEMA_SQL)
         conn.commit()
-        # Run migration for existing DBs (pre-telegram)
         _migrate_add_telegram(conn)
+        _migrate_add_facts(conn)
     finally:
         if close:
             conn.close()
@@ -420,7 +514,8 @@ def touch_session(conn, session_id: str, *, model: str | None = None, tokens: in
 def _next_seq(conn, session_id: str) -> int:
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT COALESCE(MAX(seq), -1) + 1 FROM messages WHERE session_id = %s", (session_id,)
+            "SELECT COALESCE(MAX(seq), -1) + 1 FROM messages WHERE session_id = %s FOR UPDATE",
+            (session_id,),
         )
         (seq,) = cur.fetchone()
         return int(seq)
@@ -592,3 +687,147 @@ def delete_session(conn, session_id: str) -> None:
     with conn.cursor() as cur:
         cur.execute("DELETE FROM sessions WHERE id = %s", (session_id,))
         conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# Facts / Memory — explicit user knowledge
+# ---------------------------------------------------------------------------
+
+_FACT_COLS = ["id", "user_id", "type", "key", "value", "source", "confidence", "created_at", "updated_at"]
+
+
+def _row_to_fact(row: Any) -> dict[str, Any]:
+    return dict(zip(_FACT_COLS, row, strict=False))
+
+
+def upsert_fact(
+    conn,
+    user_id: str,
+    type: str,
+    key: str,
+    value: str,
+    *,
+    source: str = "user",
+    confidence: float = 1.0,
+) -> dict[str, Any]:
+    """Insert or update a fact. Returns the record."""
+    normalized_key = _normalize_key(key)
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO facts (user_id, type, key, value, source, confidence)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            ON CONFLICT (user_id, key) DO UPDATE SET
+                type = EXCLUDED.type,
+                value = EXCLUDED.value,
+                source = EXCLUDED.source,
+                confidence = EXCLUDED.confidence,
+                updated_at = NOW()
+            RETURNING id::text, user_id::text, type, key, value, source, confidence, created_at, updated_at
+            """,
+            (user_id, type, normalized_key, value, source, confidence),
+        )
+        row = cur.fetchone()
+        conn.commit()
+    return _row_to_fact(row)
+
+
+def get_fact(conn, user_id: str, key: str) -> dict[str, Any] | None:
+    """Get a single fact by key."""
+    normalized_key = _normalize_key(key)
+    with conn.cursor() as cur:
+        cur.execute(
+            """SELECT id::text, user_id::text, type, key, value, source, confidence, created_at, updated_at
+               FROM facts WHERE user_id = %s AND key = %s""",
+            (user_id, normalized_key),
+        )
+        row = cur.fetchone()
+    return _row_to_fact(row) if row else None
+
+
+def search_facts(
+    conn,
+    user_id: str,
+    query: str,
+    *,
+    type: str | None = None,
+    limit: int = 10,
+) -> list[dict[str, Any]]:
+    """Search facts by ILIKE on key and value."""
+    with conn.cursor() as cur:
+        if type:
+            cur.execute(
+                """SELECT id::text, user_id::text, type, key, value, source, confidence, created_at, updated_at
+                   FROM facts
+                   WHERE user_id = %s AND type = %s
+                     AND (key ILIKE %s OR value ILIKE %s)
+                   ORDER BY updated_at DESC
+                   LIMIT %s""",
+                (user_id, type, f"%{query}%", f"%{query}%", limit),
+            )
+        else:
+            cur.execute(
+                """SELECT id::text, user_id::text, type, key, value, source, confidence, created_at, updated_at
+                   FROM facts
+                   WHERE user_id = %s
+                     AND (key ILIKE %s OR value ILIKE %s)
+                   ORDER BY updated_at DESC
+                   LIMIT %s""",
+                (user_id, f"%{query}%", f"%{query}%", limit),
+            )
+        rows = cur.fetchall()
+    return [_row_to_fact(r) for r in rows]
+
+
+def delete_fact(conn, user_id: str, key: str) -> bool:
+    """Delete a fact by key. Returns True if deleted."""
+    normalized_key = _normalize_key(key)
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM facts WHERE user_id = %s AND key = %s", (user_id, normalized_key))
+        deleted = cur.rowcount > 0
+        conn.commit()
+    return deleted
+
+
+def list_facts(conn, user_id: str, *, type: str | None = None) -> list[dict[str, Any]]:
+    """List all facts for a user, optionally filtered by type."""
+    with conn.cursor() as cur:
+        if type:
+            cur.execute(
+                """SELECT id::text, user_id::text, type, key, value, source, confidence, created_at, updated_at
+                   FROM facts WHERE user_id = %s AND type = %s ORDER BY updated_at DESC""",
+                (user_id, type),
+            )
+        else:
+            cur.execute(
+                """SELECT id::text, user_id::text, type, key, value, source, confidence, created_at, updated_at
+                   FROM facts WHERE user_id = %s ORDER BY updated_at DESC""",
+                (user_id,),
+            )
+        rows = cur.fetchall()
+    return [_row_to_fact(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Key normalization
+# ---------------------------------------------------------------------------
+
+_KEY_RE = re.compile(r"[^a-z0-9_]")
+
+
+def _normalize_key(key: str) -> str:
+    """Normalize a memory key to canonical snake_case format.
+
+    - lowercase
+    - spaces/ hyphens -> underscores
+    - strip non-alphanumeric except underscores
+    - collapse consecutive underscores
+    - strip leading/trailing underscores
+    - max 64 chars
+    """
+    k = key.strip().lower()
+    k = k.replace(" ", "_").replace("-", "_")
+    k = _KEY_RE.sub("", k)
+    k = re.sub(r"_+", "_", k)
+    k = k.strip("_")
+    return k[:64]

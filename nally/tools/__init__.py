@@ -8,6 +8,7 @@ from pathlib import Path
 from .base import Tool, ToolRegistry, ToolResult
 from .fetch import register_fetch_tools
 from .filesystem import register_filesystem_tools
+from .memory import register_memory_tools
 from .shell import register_shell_tools
 from .websearch import register_web_tools
 
@@ -21,18 +22,26 @@ def build_default_registry(
     mcp_config: dict | None = None,
     load_mcp: bool = True,
     workspace: Path | None = None,
+    user_id: str | None = None,
 ) -> ToolRegistry:
     """Create a registry with all built-in tools (+ MCP when enabled).
 
     MCP tools are discovered via ``nally.mcp`` and injected as normalized
     ``Tool`` objects. Agent never knows whether a tool came from
     ``filesystem.py`` or an MCP server.
+
+    Memory tools are only registered when user_id is provided (persistence enabled).
     """
     registry = ToolRegistry(max_output=max_output)
     register_filesystem_tools(registry, workspace=workspace)
     register_shell_tools(registry)
     register_web_tools(registry)
     register_fetch_tools(registry)
+    if user_id:
+        try:
+            register_memory_tools(registry, user_id)
+        except Exception as exc:
+            logger.warning("Memory tools not loaded: %s", exc)
     if load_mcp:
         try:
             from ..config import MCP_ENABLED, get_mcp_servers_config
