@@ -29,7 +29,9 @@ def _disable_mcp_by_default():
     Tests that need MCP should explicitly patch get_mcp_servers_config
     or pass load_mcp=False / mcp_config={}.
     """
-    with patch("nally.config.MCP_ENABLED", False):
-        with patch("nally.mcp.adapter.load_mcp_tools_sync", return_value=0):
-            with patch("nally.tools.mcp.adapter.load_mcp_tools_sync", return_value=0):
-                yield
+    with (
+        patch("nally.config.MCP_ENABLED", False),
+        patch("nally.mcp.adapter.load_mcp_tools_sync", return_value=0),
+        patch("nally.tools.mcp.adapter.load_mcp_tools_sync", return_value=0),
+    ):
+        yield

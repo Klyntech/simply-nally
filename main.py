@@ -77,6 +77,13 @@ def build_parser() -> argparse.ArgumentParser:
     tg_p.add_argument("--token", default=None, help="Override TELEGRAM_BOT_TOKEN")
     tg_p.add_argument("--drop-pending", action="store_true", help="Drop pending updates on start")
 
+    # ---- mcp (permanent GitHub device flow) ----
+    mcp_p = sub.add_parser("mcp", help="MCP GitHub auth (permanent device flow)")
+    mcp_sub = mcp_p.add_subparsers(dest="mcp_command")
+    mcp_sub.add_parser("status", help="Show MCP status + GitHub auth")
+    mcp_sub.add_parser("login", help="Login to GitHub via device flow (permanent)")
+    mcp_sub.add_parser("logout", help="Clear cached GitHub MCP token")
+
     # Also include chat flags so `main.py auth --help` doesn't confuse, and top-level --help lists them
     p.add_argument("--model", default=None, help=argparse.SUPPRESS)
     p.add_argument("--max-iterations", type=int, default=None, help=argparse.SUPPRESS)
@@ -259,13 +266,99 @@ def handle_auth(args) -> int:
     return 2
 
 
+def handle_mcp(args) -> int:
+    """Permanent GitHub MCP device-flow auth (mirrors Telegram /mcp)."""
+    cmd = getattr(args, "mcp_command", None) or "status"
+
+    if cmd == "status":
+        from nally.config import MCP_ENABLED
+        from nally.github_oauth import is_github_authenticated
+        from nally.mcp.adapter import _has_mcp as has_mcp_pkg
+        from nally.mcp.auth import get_cached_token, token_is_valid
+
+        print(f"MCP enabled: {MCP_ENABLED}")
+        try:
+            status = "installed" if has_mcp_pkg() else 'not installed (pip install "simply-nally[mcp]")'
+            print(f"mcp package: {status}")
+        except Exception:
+            print("mcp package: unknown")
+        print(f"GitHub auth: {'yes' if is_github_authenticated() else 'no'}")
+        if token_is_valid():
+            print(f"cached token: yes ({get_cached_token()[:12]}…)" if get_cached_token() else "cached token: yes")
+        else:
+            print("cached token: no (run `python main.py mcp login`)")
+        # Also show transport
+        try:
+            from nally.config import get_mcp_servers_config
+            cfg = get_mcp_servers_config()
+            if cfg:
+                for name, c in cfg.items():
+                    print(f"  server {name}: {c}")
+            else:
+                print("servers: none (check NALLY_MCP_ENABLED)")
+        except Exception as exc:
+            print(f"servers error: {exc}")
+        return 0
+
+    if cmd == "logout":
+        from nally.github_oauth import clear_github_token
+
+        if clear_github_token():
+            print("Cleared cached GitHub MCP token.")
+        else:
+            print("No cached token to clear.")
+        return 0
+
+    if cmd == "login":
+        import os
+
+        cid = os.getenv("GITHUB_CLIENT_ID", "").strip()
+        csec = os.getenv("GITHUB_CLIENT_SECRET", "").strip()
+        if not cid or not csec:
+            print("Config error: GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET not set", file=sys.stderr)
+            print("Hint: create an OAuth App at https://github.com/settings/developers and enable Device Flow", file=sys.stderr)
+            return 2
+        try:
+            from nally.github_oauth import github_poll_token, github_request_device_code
+
+            print("Requesting GitHub device code…")
+            data = github_request_device_code()
+            uri = data.get("verification_uri", "https://github.com/login/device")
+            code = data["user_code"]
+            interval = data.get("interval", 5)
+            expires = data.get("expires_in", 900)
+            print(f"\nGo to: {uri}")
+            print(f"Enter code: {code}")
+            print(f"Expires in {expires//60} min — polling every {interval}s…\n")
+            # Blocking poll (same as Telegram inline flow, permanent)
+            token = github_poll_token(
+                device_code=data["device_code"],
+                expires_in=expires,
+                interval=interval,
+            )
+            print(f"GitHub MCP login permanent — token cached: {token[:12]}…")
+            print("Stored at ~/.config/simply-nally/github_oauth_token.json (0600)")
+            return 0
+        except RuntimeError as exc:
+            print(f"Login failed: {exc}", file=sys.stderr)
+            return 1
+        except KeyboardInterrupt:
+            print("\nCancelled.", file=sys.stderr)
+            return 130
+        except Exception as exc:
+            print(f"Login error: {type(exc).__name__}: {exc}", file=sys.stderr)
+            return 1
+
+    return 2
+
+
 def main(argv: list[str] | None = None) -> int:
     if argv is None:
         argv = sys.argv[1:]
 
     # Dispatch: if first arg is a known subcommand, parse as subcommand; else chat mode.
     # This avoids argparse collision where `hello` is mistaken for a subcommand.
-    if argv and argv[0] in ("auth", "history", "clear", "telegram"):
+    if argv and argv[0] in ("auth", "history", "clear", "telegram", "mcp"):
         parser = build_parser()
         args = parser.parse_args(argv)
         if args.command == "auth":
@@ -355,6 +448,8 @@ def main(argv: list[str] | None = None) -> int:
             except KeyboardInterrupt:
                 print("\nTelegram bot stopped.")
                 return 0
+        if args.command == "mcp":
+            return handle_mcp(args)
         # Fallback (should not happen)
         parser.print_help()
         return 2
@@ -366,6 +461,7 @@ def main(argv: list[str] | None = None) -> int:
         chat_p.print_help()
         print("\nSubcommands:")
         print("  auth login|logout|status|init-db   Google OAuth + NEON")
+        print("  mcp status|login|logout            GitHub MCP (permanent device flow)")
         print("  history [--json] [--limit N]        Show persisted history")
         print("  clear                               Clear persisted history")
         print("  telegram [--token TOKEN]            Run Telegram bot (polling)")
