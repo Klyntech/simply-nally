@@ -186,15 +186,12 @@ class Agent:
                 )
             except LLMError as exc:
                 err_msg = f"LLM error: {exc}"
-                err: dict[str, Any] = {"role": "assistant", "content": err_msg}
-                self.messages.append(err)
-                self._persist(err)
+                # Do NOT persist LLM errors — they pollute NEON history and cause
+                # the next turn to hallucinate apologies (seen with hy3-free 401).
+                # Keep user_msg in history, but return error transiently.
                 return err_msg
             except Exception as exc:
                 err_msg = f"Unexpected LLM error: {type(exc).__name__}: {exc}"
-                err2: dict[str, Any] = {"role": "assistant", "content": err_msg}
-                self.messages.append(err2)
-                self._persist(err2)
                 return err_msg
 
             choice = response.choices[0]
@@ -203,7 +200,20 @@ class Agent:
 
             # No tools requested -> final response
             if not tool_calls:
-                content = msg.content or ""
+                content = getattr(msg, "content", None) or ""
+                # Fallback for reasoning models (nvidia nemotron, ling) that put
+                # thinking in reasoning_content when content is empty/truncated
+                if not content.strip():
+                    for attr in ("reasoning_content", "reasoning", "reasoning_details"):
+                        val = getattr(msg, attr, None)
+                        if isinstance(val, str) and val.strip():
+                            content = val.strip()
+                            break
+                        if isinstance(val, list) and val and isinstance(val[0], dict):
+                            txt = val[0].get("text") or val[0].get("content") or ""
+                            if isinstance(txt, str) and txt.strip():
+                                content = txt.strip()
+                                break
                 # Handle empty response — retry once before giving up
                 if not content.strip():
                     self.messages.append(

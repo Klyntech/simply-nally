@@ -38,6 +38,7 @@ _API_KEY_MAP = {
     "openai": _first_key("OPENAI_API_KEY"),
     "groq": _first_key("GROQ_API_KEY"),
     "opencode": _first_key("OPENCODE_API_KEY"),
+    "nvidia": _first_key("NVIDIA_API_KEY"),
 }
 
 # Allow OPENAI_API_KEY as generic fallback for any provider
@@ -52,6 +53,7 @@ _PROVIDER_BASE_URL = {
     "openai": "https://api.openai.com/v1",
     "groq": "https://api.groq.com/openai/v1",
     "opencode": "https://opencode.ai/zen/v1",
+    "nvidia": "https://integrate.api.nvidia.com/v1",
 }
 
 BASE_URL: str = _EXPLICIT_BASE_URL or _PROVIDER_BASE_URL.get(PROVIDER, "https://api.openai.com/v1")
@@ -62,7 +64,11 @@ _EXPLICIT_MODEL = os.getenv("NALLY_MODEL", "") or os.getenv("MODEL", "")
 _PROVIDER_DEFAULT_MODEL = {
     "openai": "gpt-4o-mini",
     "groq": "llama-3.3-70b-versatile",
-    "opencode": "hy3-free",
+    # hy3-free retired 2026-08 — use ling-3.0-flash-fin-free or mimo-v2.5-free (free tier, flaky)
+    # For stable free: use Vmcj key + ling-3.0-flash-fin-free (needs max_tokens >= 800)
+    "opencode": "ling-3.0-flash-fin-free",
+    # Nvidia NIM — use nvidia/nemotron-3.5-lightning-30b-a3b or meta/muse-glimmer-30b
+    "nvidia": "nvidia/nemotron-3.5-lightning-30b-a3b",
 }
 
 MODEL: str = _EXPLICIT_MODEL or _PROVIDER_DEFAULT_MODEL.get(PROVIDER, "gpt-4o-mini")

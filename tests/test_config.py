@@ -2,7 +2,7 @@ from nally import config as cfg
 
 
 def test_defaults():
-    assert cfg.PROVIDER in ("openai", "groq", "opencode")
+    assert cfg.PROVIDER in ("openai", "groq", "opencode", "nvidia")
     assert cfg.MODEL
     assert cfg.BASE_URL.startswith("http")
     assert cfg.MAX_ITERATIONS >= 1

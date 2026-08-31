@@ -77,14 +77,24 @@ class LLMClient:
         try:
             return client.chat.completions.create(**kwargs)
         except Exception as exc:
-            msg = str(exc).lower()
-            # Map common errors to clearer messages
-            if "401" in msg or "auth" in msg or "api key" in msg:
-                raise LLMError(f"Authentication failed: {exc}", retryable=False) from exc
-            if "429" in msg or "rate" in msg:
-                raise LLMError(f"Rate limited: {exc}", retryable=True) from exc
-            if "model" in msg and ("not found" in msg or "does not exist" in msg):
+            msg = str(exc)
+            low = msg.lower()
+            # Model errors must win over generic 401 — opencode returns 401 ModelError
+            if (
+                "not supported" in low
+                or "modelerror" in low
+                or "model_not_found" in low
+                or "does not exist" in low
+                or "not found" in low
+                or ("model" in low and "not supported" in low)
+            ):
                 raise LLMError(f"Model not found: {exc}", retryable=False) from exc
+            if "429" in low or "rate" in low or "freeusagelimit" in low:
+                raise LLMError(f"Rate limited: {exc}", retryable=True) from exc
+            if "503" in low or "unavailable" in low or "resourceexhausted" in low:
+                raise LLMError(f"Service unavailable: {exc}", retryable=True) from exc
+            if "401" in low or "auth" in low or "api key" in low or "creditserror" in low:
+                raise LLMError(f"Authentication failed: {exc}", retryable=False) from exc
             raise LLMError(f"LLM call failed: {exc}", retryable=False) from exc
 
     def simple_chat(self, user_message: str, system_prompt: str | None = None) -> str:
@@ -93,7 +103,20 @@ class LLMClient:
             messages.append({"role": "system", "content": system_prompt})
         messages.append({"role": "user", "content": user_message})
         resp = self.chat(messages)
-        return resp.choices[0].message.content or ""
+        msg = resp.choices[0].message
+        # Some reasoning models (nvidia, ling) put thinking in reasoning_content/reasoning
+        content = getattr(msg, "content", None) or ""
+        if not content or not content.strip():
+            # Fallback to reasoning fields if content empty
+            for attr in ("reasoning_content", "reasoning", "reasoning_details"):
+                val = getattr(msg, attr, None)
+                if isinstance(val, str) and val.strip():
+                    return val.strip()
+                if isinstance(val, list) and val and isinstance(val[0], dict):
+                    txt = val[0].get("text") or val[0].get("content") or ""
+                    if isinstance(txt, str) and txt.strip():
+                        return txt.strip()
+        return content or ""
 
 
 # Default singleton (lazy — safe to import even without API key)
