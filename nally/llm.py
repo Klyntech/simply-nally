@@ -60,7 +60,8 @@ class LLMClient:
         tools: list[dict[str, Any]] | None = None,
         model: str | None = None,
         temperature: float = 0.7,
-        max_tokens: int = 4096,
+        max_tokens: int = 2048,
+        extra_body: dict[str, Any] | None = None,
     ):
         """Call chat.completions.create. Returns OpenAI response object."""
         client = self._ensure_client()
@@ -73,6 +74,8 @@ class LLMClient:
         if tools:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = "auto"
+        if extra_body:
+            kwargs["extra_body"] = extra_body
 
         try:
             return client.chat.completions.create(**kwargs)

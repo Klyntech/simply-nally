@@ -67,8 +67,9 @@ _PROVIDER_DEFAULT_MODEL = {
     # hy3-free retired 2026-08 — use ling-3.0-flash-fin-free or mimo-v2.5-free (free tier, flaky)
     # For stable free: use Vmcj key + ling-3.0-flash-fin-free (needs max_tokens >= 800)
     "opencode": "ling-3.0-flash-fin-free",
-    # Nvidia NIM — use nvidia/nemotron-3.5-lightning-30b-a3b or meta/muse-glimmer-30b
-    "nvidia": "nvidia/nemotron-3.5-lightning-30b-a3b",
+    # Nvidia NIM — super is 3x faster than 3.5-lightning (3.3s vs 22-39s for tool calls, tested 2026-08-31)
+    # super 120b: 3.0s (thinking False) / 7.5s (default) for limerick; 3.3s for tool calls
+    "nvidia": "nvidia/nemotron-3-super-120b-a12b",
 }
 
 MODEL: str = _EXPLICIT_MODEL or _PROVIDER_DEFAULT_MODEL.get(PROVIDER, "gpt-4o-mini")
