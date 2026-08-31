@@ -1,5 +1,55 @@
-"""Tools package."""
+"""Tools package — registry construction + all built-in tools."""
+
+from __future__ import annotations
+
+import logging
 
 from .base import Tool, ToolRegistry
+from .fetch import register_fetch_tools
+from .filesystem import register_filesystem_tools
+from .shell import register_shell_tools
+from .think import register_think_tools
+from .websearch import register_web_tools
 
-__all__ = ["Tool", "ToolRegistry"]
+logger = logging.getLogger(__name__)
+
+__all__ = ["Tool", "ToolRegistry", "build_default_registry"]
+
+
+def build_default_registry(
+    max_output: int = 8000,
+    mcp_config: dict | None = None,
+    load_mcp: bool = True,
+) -> ToolRegistry:
+    """Create a registry with all v0.1 tools (+ MCP when enabled).
+
+    MCP tools are discovered via ``nally.mcp`` and injected as normalized
+    ``Tool`` objects. Agent never knows whether a tool came from
+    ``filesystem.py`` or an MCP server.
+    """
+    registry = ToolRegistry(max_output=max_output)
+    register_filesystem_tools(registry)
+    register_shell_tools(registry)
+    register_web_tools(registry)
+    register_fetch_tools(registry)
+    register_think_tools(registry)
+    if load_mcp:
+        try:
+            from ..config import MCP_ENABLED, get_mcp_servers_config
+
+            if MCP_ENABLED:
+                cfg = mcp_config if mcp_config is not None else get_mcp_servers_config()
+                if cfg:
+                    try:
+                        from ..mcp.adapter import load_mcp_tools_sync
+
+                        load_mcp_tools_sync(registry, config=cfg)
+                    except Exception as exc:
+                        logger.warning(
+                            "MCP tools not loaded: %s: %s", type(exc).__name__, exc
+                        )
+        except Exception as exc:
+            logger.warning(
+                "MCP setup failed: %s: %s", type(exc).__name__, exc
+            )
+    return registry

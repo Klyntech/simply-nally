@@ -161,22 +161,27 @@ def _get_or_create_agent(chat_id: int, telegram_user_id: str | None = None):
                     conn.close()
         except Exception as exc:
             logger.debug("telegram agent: db lookup failed: %s", exc)
-    # Build agent (loads history if session_store present)
+    # Build agent with Conversation (loads history if session_store present)
     try:
         from nally.agent import Agent as _Agent
+        from nally.conversation import Conversation
 
-        agent = (
-            _Agent(session_store=session_store)
-            if session_store is not None
-            else _Agent(auto_persist=False)
-        )
-        # If linked but in-memory fallback was used, store with session_store
         if session_store is not None:
-            agent.session_store = session_store
+            conversation = Conversation(
+                system_prompt="",
+                session_store=session_store,
+                auto_persist=False,
+            )
+        else:
+            conversation = Conversation(
+                system_prompt="",
+                auto_persist=False,
+            )
+        agent = _Agent(conversation=conversation)
     except Exception:
         from nally.agent import Agent as _Agent
 
-        agent = _Agent(auto_persist=False)
+        agent = _Agent()
     _agents[chat_id] = agent
     return agent
 

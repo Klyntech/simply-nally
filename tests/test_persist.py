@@ -434,17 +434,17 @@ class FakeLLM:
 
 class TestAgentPersistence:
     def test_agent_runs_without_persistence_by_default(self):
-        # No auth, no DB -> should still work
+        # No auth, no DB -> should still work (conftest mocks get_session_store)
         llm = FakeLLM([FakeResponse("hello")])
-        agent = Agent(llm_client=llm, auto_persist=True, session_store=None)
-        # Since no auth file and no DB, session_store will be None
-        assert agent.session_store is None
+        agent = Agent(llm_client=llm)
+        assert agent.conversation.is_persisting is False
         reply = agent.run("hi")
         assert reply == "hello"
         assert len(agent.messages) == 3  # system + user + assistant
 
-    def test_agent_persists_messages_with_fake_store(self):
-        # Provide a fake store that records appends
+    def test_conversation_persists_messages_with_fake_store(self):
+        from nally.conversation import Conversation
+
         appended = []
 
         class FakeStore:
@@ -463,8 +463,9 @@ class TestAgentPersistence:
             def count(self):
                 return len(appended)
 
+        conv = Conversation(system_prompt="sys", session_store=FakeStore(), auto_persist=False)
         llm = FakeLLM([FakeResponse("done")])
-        agent = Agent(llm_client=llm, session_store=FakeStore(), auto_persist=False)
+        agent = Agent(llm_client=llm, conversation=conv)
         # Should have persisted system prompt on init
         assert len(appended) == 1
         assert appended[0][0]["role"] == "system"
@@ -480,7 +481,9 @@ class TestAgentPersistence:
         assert appended[2][1]["model"] == "hy3-free"
         assert appended[2][1]["total_tokens"] == 15
 
-    def test_agent_persists_tool_calls_and_results(self):
+    def test_conversation_persists_tool_calls_and_results(self):
+        from nally.conversation import Conversation
+
         appended = []
 
         class FakeStore:
@@ -496,6 +499,7 @@ class TestAgentPersistence:
             def clear(self, keep_system_prompt=None):
                 return True
 
+        conv = Conversation(system_prompt="sys", session_store=FakeStore(), auto_persist=False)
         # LLM will request a tool then answer
         tool_tc = MagicMock()
         tool_tc.id = "call_123"
@@ -507,7 +511,7 @@ class TestAgentPersistence:
                 FakeResponse("listed"),
             ]
         )
-        agent = Agent(llm_client=llm, session_store=FakeStore(), auto_persist=False)
+        agent = Agent(llm_client=llm, conversation=conv)
         appended.clear()  # clear system prompt
         reply = agent.run("list")
         assert reply == "listed"
@@ -517,7 +521,9 @@ class TestAgentPersistence:
         assert appended[1]["tool_calls"][0]["id"] == "call_123"
         assert appended[2]["tool_call_id"] == "call_123"
 
-    def test_agent_loads_existing_history(self):
+    def test_conversation_loads_existing_history(self):
+        from nally.conversation import Conversation
+
         persisted = [
             {"role": "system", "content": "sys"},
             {"role": "user", "content": "old hi"},
@@ -536,14 +542,17 @@ class TestAgentPersistence:
             def clear(self, **kw):
                 return True
 
+        conv = Conversation(system_prompt="sys", session_store=FakeStore(), auto_persist=False)
         llm = FakeLLM([FakeResponse("new")])
-        agent = Agent(llm_client=llm, session_store=FakeStore(), auto_persist=False)
+        agent = Agent(llm_client=llm, conversation=conv)
         assert agent.messages == persisted  # loaded from store, not fresh system prompt
         reply = agent.run("new msg")
         assert reply == "new"
         assert len(agent.messages) == 5  # persisted 3 + user + assistant
 
-    def test_agent_clear_clears_store(self):
+    def test_conversation_clear_clears_store(self):
+        from nally.conversation import Conversation
+
         cleared = {}
 
         class FakeStore:
@@ -559,21 +568,28 @@ class TestAgentPersistence:
                 cleared["prompt"] = keep_system_prompt
                 return True
 
+        conv = Conversation(system_prompt="test", session_store=FakeStore(), auto_persist=False)
         llm = FakeLLM([FakeResponse("hi")])
-        agent = Agent(llm_client=llm, session_store=FakeStore(), auto_persist=False)
+        agent = Agent(llm_client=llm, conversation=conv)
         agent.run("hello")
         agent.clear_history()
         assert cleared["prompt"] == agent.messages[0]["content"]
         assert len(agent.messages) == 1
 
     def test_agent_no_persist_flag(self):
-        # Ensure --no-persist disables even if store would be auto-discovered
-        with patch("nally.session.get_session_store", return_value=MagicMock()):
-            llm = FakeLLM([FakeResponse("hi")])
-            agent = Agent(llm_client=llm, auto_persist=False, session_store=None)
-            assert agent.session_store is None
+        from nally.conversation import Conversation
 
-    def test_agent_handles_store_error_gracefully(self):
+        # Ensure Conversation with auto_persist=False doesn't discover stores
+        with patch("nally.session.get_session_store", return_value=MagicMock()):
+            conv = Conversation(system_prompt="sys", auto_persist=False)
+            assert conv.is_persisting is False
+            llm = FakeLLM([FakeResponse("hi")])
+            agent = Agent(llm_client=llm, conversation=conv)
+            assert agent.conversation.is_persisting is False
+
+    def test_conversation_handles_store_error_gracefully(self):
+        from nally.conversation import Conversation
+
         class BadStore:
             session_id = "bad"
 
@@ -586,9 +602,10 @@ class TestAgentPersistence:
             def clear(self, **kw):
                 raise RuntimeError("db down")
 
-        llm = FakeLLM([FakeResponse("ok")])
         # Should not crash on init even if load fails
-        agent = Agent(llm_client=llm, session_store=BadStore(), auto_persist=False)
+        conv = Conversation(system_prompt="sys", session_store=BadStore(), auto_persist=False)
+        llm = FakeLLM([FakeResponse("ok")])
+        agent = Agent(llm_client=llm, conversation=conv)
         assert agent.messages[0]["role"] == "system"
         # Run should still succeed even if append fails
         reply = agent.run("hi")

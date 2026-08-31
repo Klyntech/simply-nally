@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import json
 
-from nally.agent import Agent, build_default_registry
+from nally.agent import Agent
 from nally.llm import LLMError
+from nally.tools import build_default_registry
 
 
 # ---------------------------------------------------------------------------

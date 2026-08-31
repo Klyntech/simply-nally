@@ -770,7 +770,7 @@ class TestTelegramUx:
         def on_tool(name, args):
             calls.append(name)
 
-        agent = Agent(llm_client=mock_llm, auto_persist=False, on_tool_start=on_tool)
+        agent = Agent(llm_client=mock_llm, on_tool_start=on_tool)
         # Stub registry to avoid filesystem access
         agent.registry.execute = lambda n, a: ("list ok", True)  # type: ignore
 

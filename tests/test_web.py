@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-from nally.agent import build_default_registry
+from nally.tools import build_default_registry
 from nally.tools.base import ToolRegistry
 from nally.tools.fetch import Fetch, _strip_html
 from nally.tools.websearch import WebSearch

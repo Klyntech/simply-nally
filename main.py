@@ -105,14 +105,15 @@ def run_once(agent: Agent, prompt: str) -> int:
 def interactive_loop(agent: Agent) -> int:
     print("Simply NALLY — interactive mode. Type 'exit' or 'quit' to leave.\n")
     # Show persistence status
-    if agent.session_store is not None:
+    conv = agent.conversation
+    if conv.is_persisting:
         try:
             from nally.auth import get_current_auth
 
             auth = get_current_auth()
             if auth:
                 print(
-                    f"(persisting as {auth.get('email', '')} — NEON session {agent.session_store.session_id[:8]}…)\n"
+                    f"(persisting as {auth.get('email', '')} — NEON session {conv.session_id[:8]}…)\n"
                 )
         except Exception:
             pass
@@ -151,9 +152,9 @@ def interactive_loop(agent: Agent) -> int:
                 print(f"  user: {auth.get('email')} ({auth.get('user_id', '')[:8]}…)")
                 print(f"  session: {auth.get('session_id', '')[:8]}…")
             print(f"  db_configured: {db_mod.is_configured()}")
-            if agent.session_store:
+            if conv.is_persisting:
                 print(
-                    f"  store: {agent.session_store.session_id[:8]}… count={agent.session_store.count()}"
+                    f"  store: {conv.session_id[:8]}… count={conv.count()}"
                 )
             continue
         reply = agent.run(user)
@@ -477,18 +478,26 @@ def main(argv: list[str] | None = None) -> int:
         print("Hint: copy .env.example to .env and set your API key.", file=sys.stderr)
         return 2
 
-    kwargs: dict = {}
+    agent_kwargs: dict = {}
     if args.model:
         from nally.llm import LLMClient
 
-        kwargs["llm_client"] = LLMClient(model=args.model)
+        agent_kwargs["llm_client"] = LLMClient(model=args.model)
     if args.max_iterations:
-        kwargs["max_iterations"] = args.max_iterations
-    if getattr(args, "no_persist", False):
-        kwargs["session_store"] = None
-        kwargs["auto_persist"] = False
+        agent_kwargs["max_iterations"] = args.max_iterations
 
-    agent = Agent(**kwargs)
+    # Build conversation (persistence is a Conversation concern, not Agent's)
+    from nally.config import get_system_prompt
+    from nally.conversation import Conversation
+
+    no_persist = getattr(args, "no_persist", False)
+    conv_kwargs: dict = {"system_prompt": get_system_prompt()}
+    if no_persist:
+        conv_kwargs["auto_persist"] = False
+    conversation = Conversation(**conv_kwargs)
+    agent_kwargs["conversation"] = conversation
+
+    agent = Agent(**agent_kwargs)
 
     if args.prompt:
         prompt = " ".join(args.prompt)

@@ -104,19 +104,18 @@ class LLMClient:
         messages.append({"role": "user", "content": user_message})
         resp = self.chat(messages)
         msg = resp.choices[0].message
-        # Some reasoning models (nvidia, ling) put thinking in reasoning_content/reasoning
         content = getattr(msg, "content", None) or ""
-        if not content or not content.strip():
-            # Fallback to reasoning fields if content empty
-            for attr in ("reasoning_content", "reasoning", "reasoning_details"):
-                val = getattr(msg, attr, None)
-                if isinstance(val, str) and val.strip():
-                    return val.strip()
-                if isinstance(val, list) and val and isinstance(val[0], dict):
-                    txt = val[0].get("text") or val[0].get("content") or ""
-                    if isinstance(txt, str) and txt.strip():
-                        return txt.strip()
-        return content or ""
+        # Never surface private reasoning — see Agent._extract_content
+        if not content.strip():
+            return ""
+        low = content.lower()
+        if (
+            "here's a thinking process" in low
+            or "analyze user input" in low
+            or "identify available tools" in low
+        ) and len(content) > 300:
+            return ""
+        return content
 
 
 # Default singleton (lazy — safe to import even without API key)

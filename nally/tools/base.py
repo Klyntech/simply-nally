@@ -149,6 +149,19 @@ class ToolRegistry:
         Returns (result_text, success).
         """
         tool = self._tools.get(name)
+        # Alias: allow short name without mcp prefix (model sometimes drops it)
+        if tool is None and "__" not in name:
+            # Try to find a tool that ends with __<name> (e.g. search_repositories -> mcp__github__search_repositories)
+            candidates = [n for n in self._tools if n.endswith(f"__{name}")]
+            if len(candidates) == 1:
+                tool = self._tools.get(candidates[0])
+                name = candidates[0]
+            elif len(candidates) > 1:
+                # Prefer github for search_repositories
+                github = [c for c in candidates if "github" in c]
+                if github:
+                    tool = self._tools.get(github[0])
+                    name = github[0]
         if tool is None:
             return f"Error: unknown tool '{name}'", False
 
