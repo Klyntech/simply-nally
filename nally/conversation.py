@@ -61,6 +61,12 @@ class Conversation:
             return getattr(self._session_store, "session_id", None)
         return None
 
+    @property
+    def user_id(self) -> str | None:
+        if self._session_store is not None:
+            return getattr(self._session_store, "user_id", None)
+        return None
+
     # ------------------------------------------------------------------ public
 
     def append(self, message: dict[str, Any], response: Any | None = None) -> None:

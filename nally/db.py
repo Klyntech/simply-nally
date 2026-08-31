@@ -9,6 +9,7 @@ all functions return None/[] and the agent runs in-memory only.
 
 from __future__ import annotations
 
+import atexit
 import contextlib
 import json
 import logging
@@ -59,6 +60,7 @@ def _get_pool():
         logger.warning("psycopg_pool not installed, falling back to raw connections: %s", exc)
         return None
     _pool = ConnectionPool(url, min_size=1, max_size=5, check=ConnectionPool.check_connection)
+    atexit.register(close_pool)
     return _pool
 
 

@@ -1,7 +1,7 @@
 """Simply NALLY agent — the smallest reliable loop.
 
 Flow:
-  user message -> retrieve memories -> append -> LLM (with tools) -> tool_calls? -> validate -> execute -> append results -> loop
+  user message -> retrieve memories (once) -> append -> LLM (with tools) -> tool_calls? -> validate -> execute -> append results -> loop
   No LangGraph, no guardrails. Just a while loop that works.
 """
 
@@ -61,42 +61,28 @@ class Agent:
             try:
                 from .memory.manager import MemoryManager
                 self._memory_manager = MemoryManager(user_id)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("MemoryManager init skipped: %s", exc)
 
     @property
     def messages(self) -> list[dict[str, Any]]:
         return self.conversation.get_messages()
 
     def _get_user_id(self) -> str | None:
-        """Extract user_id from conversation's session store."""
-        store = getattr(self.conversation, "_session_store", None)
-        if store is not None:
-            return getattr(store, "user_id", None)
-        return None
+        return self.conversation.user_id
 
-    def _build_messages_with_memory(self, user_input: str) -> list[dict[str, Any]]:
-        """Build message list with relevant memories injected into system prompt.
-
-        Dynamic retrieval: only relevant memories are included, not all memories.
-        """
+    def _build_messages_with_context(self, memory_context: str) -> list[dict[str, Any]]:
+        """Build message list with pre-computed memory context injected into system prompt."""
         messages = self.conversation.get_messages()
-        if self._memory_manager is None:
+        if not memory_context:
             return messages
 
-        # Get relevant memories for this user message
-        context_block = self._memory_manager.build_context_block(user_input)
-        if not context_block:
-            return messages
-
-        # Inject into the system prompt (first message)
         if messages and messages[0].get("role") == "system":
             enriched = dict(messages[0])
-            enriched["content"] = enriched["content"] + "\n\n" + context_block
+            enriched["content"] = enriched["content"] + "\n\n" + memory_context
             return [enriched, *messages[1:]]
 
-        # No system prompt — prepend one with memory context
-        return [{"role": "system", "content": context_block}, *messages]
+        return [{"role": "system", "content": memory_context}, *messages]
 
     # ------------------------------------------------------------------ public
     def run(self, user_input: str) -> str:
@@ -113,6 +99,11 @@ class Agent:
         user_msg: dict[str, Any] = {"role": "user", "content": user_input}
         self.conversation.append(user_msg)
 
+        # Retrieve memory context ONCE for this turn
+        memory_context = ""
+        if self._memory_manager is not None:
+            memory_context = self._memory_manager.build_context_block(user_input)
+
         total_tool_calls = 0
 
         for _iteration in range(1, self.max_iterations + 1):
@@ -123,8 +114,8 @@ class Agent:
                     f"Partial progress saved in history."
                 )
 
-            # Build messages with dynamic memory context
-            messages = self._build_messages_with_memory(user_input)
+            # Build messages with pre-computed memory context
+            messages = self._build_messages_with_context(memory_context)
 
             # Call LLM
             try:
@@ -150,7 +141,7 @@ class Agent:
                     self.conversation.append(
                         {"role": "user", "content": "(You must respond to the user.)"}
                     )
-                    retry_messages = self._build_messages_with_memory(user_input)
+                    retry_messages = self._build_messages_with_context(memory_context)
                     try:
                         response = self.llm.chat(
                             messages=retry_messages,
