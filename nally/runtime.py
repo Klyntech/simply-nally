@@ -281,6 +281,13 @@ class Runtime:
         except Exception:
             result["gmail_authenticated"] = False
 
+        try:
+            from nally.mcp.auth import is_notion_authenticated
+
+            result["notion_authenticated"] = is_notion_authenticated()
+        except Exception:
+            result["notion_authenticated"] = False
+
         return result
 
     def is_github_authenticated(self) -> bool:
@@ -298,6 +305,15 @@ class Runtime:
             from nally.mcp.auth import is_gmail_authenticated as _is_gmail
 
             return _is_gmail()
+        except Exception:
+            return False
+
+    def is_notion_authenticated(self) -> bool:
+        """Check if Notion is authenticated for MCP."""
+        try:
+            from nally.mcp.auth import is_notion_authenticated as _is_notion
+
+            return _is_notion()
         except Exception:
             return False
 

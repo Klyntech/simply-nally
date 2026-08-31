@@ -18,6 +18,8 @@ from .mcp_ui import (
     build_mcp_keyboard,
     callback_mcp_connect,
     callback_mcp_disconnect,
+    callback_notion_connect,
+    callback_notion_disconnect,
     mcp_status_text,
 )
 from .ux.typing import typing_loop
@@ -280,6 +282,10 @@ async def handle_callback(update, context) -> None:
         await callback_mcp_connect(query, context)
     elif data == "mcp_github_disconnect":
         await callback_mcp_disconnect(query)
+    elif data == "mcp_notion_connect":
+        await callback_notion_connect(query, context)
+    elif data == "mcp_notion_disconnect":
+        await callback_notion_disconnect(query)
 
 
 async def handle_message(update, context) -> None:

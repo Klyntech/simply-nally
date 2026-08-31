@@ -39,6 +39,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 DEFAULT_CACHE_FILE = os.path.expanduser("~/.config/simply-nally/github_oauth_token.json")
 DEFAULT_GMAIL_CACHE_FILE = os.path.expanduser("~/.config/simply-nally/gmail_oauth_token.json")
+DEFAULT_NOTION_CACHE_FILE = os.path.expanduser("~/.config/simply-nally/notion_oauth_token.json")
 
 
 def _cache_path(path: str | None = None) -> Path:
@@ -244,9 +245,18 @@ def _github_provider() -> AuthProvider:
 
 
 def _notion_provider() -> AuthProvider:
-    return EnvTokenProvider(
-        env_vars=["NOTION_TOKEN"],
-        server_filter="notion",
+    """Notion: NOTION_TOKEN env first, then cached Notion OAuth file."""
+    return ChainedProvider(
+        [
+            EnvTokenProvider(
+                env_vars=["NOTION_TOKEN"],
+                server_filter="notion",
+            ),
+            OAuthFileProvider(
+                cache_file=DEFAULT_NOTION_CACHE_FILE,
+                server_filter="notion",
+            ),
+        ]
     )
 
 
@@ -374,6 +384,30 @@ def clear_gmail_token_cache() -> bool:
     return clear_token_cache(DEFAULT_GMAIL_CACHE_FILE)
 
 
+# ---------------------------------------------------------------------------
+# Notion-specific helpers (thin wrappers over generic cache with notion file)
+# ---------------------------------------------------------------------------
+def get_notion_cached_token() -> str | None:
+    """Return cached Notion access_token if valid, else None."""
+    return get_cached_token(DEFAULT_NOTION_CACHE_FILE)
+
+
+def notion_token_is_valid() -> bool:
+    """Check if Notion cache contains a non-expired token."""
+    return token_is_valid(DEFAULT_NOTION_CACHE_FILE)
+
+
+def is_notion_authenticated() -> bool:
+    """Check if Notion is authenticated (env or cached file)."""
+    provider = _DEFAULT_PROVIDERS.get("notion")
+    return bool(provider and provider.get_headers("notion", {}))
+
+
+def clear_notion_token_cache() -> bool:
+    """Remove Notion cache file. Returns True if removed."""
+    return clear_token_cache(DEFAULT_NOTION_CACHE_FILE)
+
+
 def inject_auth(
     configs: dict[str, dict[str, Any]],
 ) -> dict[str, dict[str, Any]]:
@@ -432,18 +466,23 @@ def inject_auth(
 __all__ = [
     "DEFAULT_CACHE_FILE",
     "DEFAULT_GMAIL_CACHE_FILE",
+    "DEFAULT_NOTION_CACHE_FILE",
     "AuthProvider",
     "ChainedProvider",
     "EnvTokenProvider",
     "OAuthFileProvider",
     "clear_gmail_token_cache",
+    "clear_notion_token_cache",
     "clear_token_cache",
     "get_cached_token",
     "get_gmail_cached_token",
     "get_headers_for_server",
+    "get_notion_cached_token",
     "gmail_token_is_valid",
     "inject_auth",
     "is_gmail_authenticated",
+    "is_notion_authenticated",
+    "notion_token_is_valid",
     "read_token_cache",
     "token_is_valid",
     "write_token_cache",

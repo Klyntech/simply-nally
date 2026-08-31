@@ -199,6 +199,11 @@ NOTION_TOKEN: str = os.getenv("NOTION_TOKEN", "").strip()
 NOTION_MCP_URL: str = os.getenv("NOTION_MCP_URL", "https://mcp.notion.com/mcp").strip()
 NOTION_MCP_COMMAND: str = os.getenv("NOTION_MCP_COMMAND", "").strip()
 NOTION_MCP_ARGS: str = os.getenv("NOTION_MCP_ARGS", "").strip()
+# Notion OAuth (PKCE flow for remote MCP — dynamic client registration)
+NOTION_CLIENT_ID: str = os.getenv("NOTION_CLIENT_ID", "").strip()
+NOTION_CLIENT_SECRET: str = os.getenv("NOTION_CLIENT_SECRET", "").strip()
+NOTION_OAUTH_SCOPES: str = os.getenv("NOTION_OAUTH_SCOPES", "").strip()
+NOTION_CALLBACK_PORT: int = int(os.getenv("NOTION_CALLBACK_PORT", "8080"))
 # Gmail MCP — Google official remote (Streamable HTTP, no npm/npx needed)
 # Docs: https://developers.google.com/workspace/gmail/api/guides/configure-mcp-server
 # Requires: Google Cloud project with Gmail API + gmailmcp.googleapis.com enabled,
