@@ -18,3 +18,18 @@ def _disable_real_persistence():
     # Prevent Agent.__init__ from discovering a real SessionStore
     with patch("nally.session.get_session_store", return_value=None):
         yield
+
+
+@pytest.fixture(autouse=True)
+def _disable_mcp_by_default():
+    """Prevent Agent() from hitting real MCP servers during tests.
+
+    Without this, NALLY_MCP_ENABLED=true in .env would make every
+    Agent() try to connect to GitHub/Notion MCP (30s timeout, network).
+    Tests that need MCP should explicitly patch get_mcp_servers_config
+    or pass load_mcp=False / mcp_config={}.
+    """
+    with patch("nally.config.MCP_ENABLED", False):
+        with patch("nally.mcp.adapter.load_mcp_tools_sync", return_value=0):
+            with patch("nally.tools.mcp.adapter.load_mcp_tools_sync", return_value=0):
+                yield

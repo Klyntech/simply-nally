@@ -26,7 +26,14 @@ def build_default_registry(
     mcp_config: dict | None = None,
     load_mcp: bool = True,
 ) -> ToolRegistry:
-    """Create a registry with all v0.1 tools (+ MCP GitHub when enabled)."""
+    """Create a registry with all v0.1 tools (+ MCP when enabled).
+
+    MCP tools are discovered via ``nally.mcp`` and injected as normalized
+    ``Tool`` objects. Agent never knows whether a tool came from
+    ``filesystem.py`` or an MCP server.
+    """
+    import logging
+
     registry = ToolRegistry(max_output=max_output)
     register_filesystem_tools(registry)
     register_shell_tools(registry)
@@ -41,13 +48,17 @@ def build_default_registry(
                 cfg = mcp_config if mcp_config is not None else get_mcp_servers_config()
                 if cfg:
                     try:
-                        from .tools.mcp.adapter import load_mcp_tools_sync
+                        from nally.mcp.adapter import load_mcp_tools_sync
 
                         load_mcp_tools_sync(registry, config=cfg)
-                    except Exception:
-                        pass
-        except Exception:
-            pass
+                    except Exception as exc:
+                        logging.getLogger(__name__).warning(
+                            "MCP tools not loaded: %s: %s", type(exc).__name__, exc
+                        )
+        except Exception as exc:
+            logging.getLogger(__name__).warning(
+                "MCP setup failed: %s: %s", type(exc).__name__, exc
+            )
     return registry
 
 

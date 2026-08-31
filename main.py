@@ -321,7 +321,10 @@ def main(argv: list[str] | None = None) -> int:
             token = args.token or TELEGRAM_BOT_TOKEN
             if not token:
                 print("Config error: TELEGRAM_BOT_TOKEN not set", file=sys.stderr)
-                print("Hint: get a token from @BotFather and set TELEGRAM_BOT_TOKEN in .env", file=sys.stderr)
+                print(
+                    "Hint: get a token from @BotFather and set TELEGRAM_BOT_TOKEN in .env",
+                    file=sys.stderr,
+                )
                 return 2
             # Ensure DB schema is at least initialized
             try:

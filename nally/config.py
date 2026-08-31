@@ -135,8 +135,8 @@ DEFAULT_SYSTEM_PROMPT = (
     "- Never expose secrets, API keys, or credentials in output.\n"
     "\n"
     "# Output Format\n"
-    "- Default: Direct answer, no preamble. No \"Great question!\" or \"I'd be "
-    "happy to help.\"\n"
+    '- Default: Direct answer, no preamble. No "Great question!" or "I\'d be '
+    'happy to help."\n'
     "- Code: Fenced blocks with language tag. Include imports. Keep it runnable.\n"
     "- Plans: Numbered steps with brief explanations.\n"
     "- Research: Key findings first, then details. Cite sources inline.\n"
@@ -155,6 +155,97 @@ def get_system_prompt() -> str:
 TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 GOOGLE_DEVICE_CLIENT_ID: str = os.getenv("GOOGLE_DEVICE_CLIENT_ID", "").strip()
 GOOGLE_DEVICE_CLIENT_SECRET: str = os.getenv("GOOGLE_DEVICE_CLIENT_SECRET", "").strip()
+
+# ---------------------------------------------------------------------------
+# MCP — Model Context Protocol (opt-in, GitHub first)
+# ---------------------------------------------------------------------------
+MCP_ENABLED: bool = os.getenv("NALLY_MCP_ENABLED", "false").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+MCP_TIMEOUT: int = _int_env("NALLY_MCP_TIMEOUT", 30)
+MCP_DENY: list[str] = [s.strip() for s in os.getenv("NALLY_MCP_DENY", "").split(",") if s.strip()]
+# JSON map of server_name -> config (command/url/etc). Prefer explicit per-server env.
+MCP_SERVERS_JSON: str = os.getenv("NALLY_MCP_SERVERS", "").strip()
+
+# GitHub MCP — OAuth for all (remote Streamable HTTP default)
+GITHUB_MCP_URL: str = os.getenv("GITHUB_MCP_URL", "https://api.githubcopilot.com/mcp/").strip()
+GITHUB_MCP_PAT: str = (
+    os.getenv("GITHUB_PERSONAL_ACCESS_TOKEN", "").strip() or os.getenv("GITHUB_TOKEN", "").strip()
+)
+GITHUB_MCP_TOOLSETS: str = os.getenv("GITHUB_TOOLSETS", "").strip()
+GITHUB_MCP_READ_ONLY: bool = os.getenv("GITHUB_READ_ONLY", "false").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+# Local stdio fallback (Docker or binary). If set, stdio takes precedence over URL.
+GITHUB_MCP_COMMAND: str = os.getenv("GITHUB_MCP_COMMAND", "").strip()
+GITHUB_MCP_ARGS: str = os.getenv("GITHUB_MCP_ARGS", "").strip()
+# GitHub OAuth app credentials (for OAuth flow)
+GITHUB_CLIENT_ID: str = os.getenv("GITHUB_CLIENT_ID", "").strip()
+GITHUB_CLIENT_SECRET: str = os.getenv("GITHUB_CLIENT_SECRET", "").strip()
+GITHUB_OAUTH_SCOPES: str = os.getenv("GITHUB_OAUTH_SCOPES", "").strip()
+# Notion MCP — NOTION_TOKEN for local stdio, NOTION_MCP_URL for remote
+NOTION_TOKEN: str = os.getenv("NOTION_TOKEN", "").strip()
+NOTION_MCP_URL: str = os.getenv("NOTION_MCP_URL", "https://mcp.notion.com/mcp").strip()
+NOTION_MCP_COMMAND: str = os.getenv("NOTION_MCP_COMMAND", "").strip()
+NOTION_MCP_ARGS: str = os.getenv("NOTION_MCP_ARGS", "").strip()
+
+
+def get_mcp_servers_config() -> dict:
+    """Return dict server_name -> config for enabled MCP servers.
+
+    Returns raw transport config only (command/url/args). Auth is injected
+    separately by ``nally.mcp.auth.inject_auth`` at connection time so this
+    module stays data-only and does not import ``github_oauth``.
+
+    Priority:
+      1. NALLY_MCP_SERVERS JSON (if valid, overrides per-server env)
+      2. Per-server env (GitHub, Notion)
+
+    Returns {} when MCP not enabled.
+    """
+    if not MCP_ENABLED:
+        return {}
+    # 1) JSON wins — caller-supplied headers/env are preserved verbatim
+    if MCP_SERVERS_JSON:
+        try:
+            import json as _json
+
+            data = _json.loads(MCP_SERVERS_JSON)
+            if isinstance(data, dict) and data:
+                return data
+        except Exception:
+            pass
+    # 2) Per-server env — transport only, no credential injection
+    cfg: dict = {}
+    gh: dict = {}
+    if GITHUB_MCP_COMMAND:
+        gh["command"] = GITHUB_MCP_COMMAND
+        if GITHUB_MCP_ARGS:
+            gh["args"] = GITHUB_MCP_ARGS.split()
+    else:
+        gh["url"] = GITHUB_MCP_URL
+        if GITHUB_MCP_TOOLSETS:
+            gh.setdefault("headers", {})["X-MCP-Toolsets"] = GITHUB_MCP_TOOLSETS
+        if GITHUB_MCP_READ_ONLY:
+            gh.setdefault("headers", {})["X-MCP-Readonly"] = "true"
+    if gh:
+        cfg["github"] = gh
+    nt: dict = {}
+    if NOTION_MCP_COMMAND:
+        nt["command"] = NOTION_MCP_COMMAND
+        if NOTION_MCP_ARGS:
+            nt["args"] = NOTION_MCP_ARGS.split()
+    else:
+        nt["url"] = NOTION_MCP_URL
+    if nt:
+        cfg["notion"] = nt
+    return cfg
 
 
 def validate_config(require_api_key: bool = True) -> list[str]:
