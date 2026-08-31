@@ -469,11 +469,11 @@ class TestBotHandlers:
         context = MagicMock()
         fake_agent = MagicMock()
         fake_agent.clear_history = MagicMock()
-        botmod._agents[42] = fake_agent
+        botmod._runtime._agents[42] = fake_agent
         await handle_clear(update, context)
         assert fake_agent.clear_history.called
         assert "cleared" in update.message.reply_text.call_args[0][0].lower()
-        botmod._agents.pop(42, None)
+        botmod._runtime._agents.pop(42, None)
 
     @pytest.mark.asyncio
     async def test_handle_message_not_linked(self):
@@ -521,10 +521,10 @@ class TestBotHandlers:
         with patch("nally.db.is_configured", return_value=True):
             with patch("nally.db.get_user_by_telegram_id", return_value=fake_user):
                 with patch("nally.db.connect", return_value=MagicMock()):
-                    with patch("nally.telegram.bot._get_or_create_agent", return_value=fake_agent):
+                    with patch("nally.telegram.bot._runtime.get_agent", return_value=fake_agent):
                         await handle_message(update, context)
                         # Should have called agent.run via to_thread
-                        assert True  # run is mocked, but we patch _get_or_create_agent
+                        assert True  # run is mocked, but we patch get_agent
                         # Placeholder should be edited via StatusUpdater (bot.edit_message_text) or fallback
                         assert (
                             context.bot.edit_message_text.called
@@ -592,13 +592,13 @@ class TestBotHandlers:
     def test_per_chat_agent_isolation(self):
         from nally.telegram import bot as botmod
 
-        botmod._agents.clear()
+        botmod._runtime._agents.clear()
         with patch("nally.db.is_configured", return_value=False):
-            a1 = botmod._get_or_create_agent(1, telegram_user_id=None)
-            a2 = botmod._get_or_create_agent(2, telegram_user_id=None)
+            a1 = botmod._runtime.get_agent(1, telegram_user_id=None)
+            a2 = botmod._runtime.get_agent(2, telegram_user_id=None)
             assert a1 is not a2
-            assert botmod._get_or_create_agent(1) is a1
-            botmod._agents.clear()
+            assert botmod._runtime.get_agent(1) is a1
+            botmod._runtime._agents.clear()
 
     def test_run_bot_missing_token(self):
         from nally.telegram.bot import run_bot
@@ -872,7 +872,7 @@ class TestTelegramFormat:
         with patch("nally.db.is_configured", return_value=True):
             with patch("nally.db.get_user_by_telegram_id", return_value=fake_user):
                 with patch("nally.db.connect", return_value=MagicMock()):
-                    with patch("nally.telegram.bot._get_or_create_agent", return_value=fake_agent):
+                    with patch("nally.telegram.bot._runtime.get_agent", return_value=fake_agent):
                         await handle_message(update, context)
                         # Should be sent with HTML and formatted
                         assert context.bot.edit_message_text.called
@@ -943,8 +943,8 @@ class TestMCPCallback:
         update.callback_query = query
         context = MagicMock()
         with patch("nally.github_oauth.clear_github_token", return_value=True):
-            with patch("nally.telegram.bot._build_mcp_keyboard", return_value="kb"):
-                with patch("nally.telegram.bot._mcp_status_text", return_value="text"):
+            with patch("nally.telegram.mcp_ui.build_mcp_keyboard", return_value="kb"):
+                with patch("nally.telegram.mcp_ui.mcp_status_text", return_value="text"):
                     await handle_callback(update, context)
                     assert query.answer.called
                     query.edit_message_text.assert_called_once()
