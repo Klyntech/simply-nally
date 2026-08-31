@@ -162,7 +162,7 @@ GOOGLE_DEVICE_CLIENT_ID: str = os.getenv("GOOGLE_DEVICE_CLIENT_ID", "").strip()
 GOOGLE_DEVICE_CLIENT_SECRET: str = os.getenv("GOOGLE_DEVICE_CLIENT_SECRET", "").strip()
 
 # ---------------------------------------------------------------------------
-# MCP — Model Context Protocol (opt-in, GitHub first)
+# MCP — Model Context Protocol (opt-in, v1: GitHub + Gmail + Notion only)
 # ---------------------------------------------------------------------------
 MCP_ENABLED: bool = os.getenv("NALLY_MCP_ENABLED", "false").strip().lower() in (
     "1",
@@ -172,6 +172,8 @@ MCP_ENABLED: bool = os.getenv("NALLY_MCP_ENABLED", "false").strip().lower() in (
 )
 MCP_TIMEOUT: int = _int_env("NALLY_MCP_TIMEOUT", 30)
 MCP_DENY: list[str] = [s.strip() for s in os.getenv("NALLY_MCP_DENY", "").split(",") if s.strip()]
+# Supported MCP servers — v1 lock
+SUPPORTED_MCP_SERVERS: set[str] = {"github", "gmail", "notion"}
 # JSON map of server_name -> config (command/url/etc). Prefer explicit per-server env.
 MCP_SERVERS_JSON: str = os.getenv("NALLY_MCP_SERVERS", "").strip()
 
@@ -235,9 +237,9 @@ def get_mcp_servers_config() -> dict:
 
     Priority:
       1. NALLY_MCP_SERVERS JSON (if valid, overrides per-server env)
-      2. Per-server env (GitHub, Notion)
+      2. Per-server env (GitHub, Notion, Gmail)
 
-    Returns {} when MCP not enabled.
+    Returns {} when MCP not enabled. Rejects unsupported servers.
     """
     if not MCP_ENABLED:
         return {}
@@ -248,7 +250,16 @@ def get_mcp_servers_config() -> dict:
 
             data = _json.loads(MCP_SERVERS_JSON)
             if isinstance(data, dict) and data:
-                return data
+                # Filter unsupported servers
+                filtered = {k: v for k, v in data.items() if k in SUPPORTED_MCP_SERVERS}
+                rejected = set(data.keys()) - SUPPORTED_MCP_SERVERS
+                if rejected:
+                    import logging
+
+                    logging.getLogger(__name__).warning(
+                        "Ignoring unsupported MCP servers: %s", ", ".join(sorted(rejected))
+                    )
+                return filtered
         except Exception:
             pass
     # 2) Per-server env — transport only, no credential injection

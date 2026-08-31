@@ -249,8 +249,12 @@ class Runtime:
 
     # ------------------------------------------------------------------ MCP status
 
-    def get_mcp_status(self) -> dict[str, Any]:
-        """Return normalized MCP status (no Telegram UI, no DB)."""
+    def get_mcp_status(self, user_id: str | None = None) -> dict[str, Any]:
+        """Return normalized MCP status (no Telegram UI, no DB).
+
+        If user_id is provided, checks per-user connection status.
+        Otherwise returns global status for backwards compatibility.
+        """
         result: dict[str, Any] = {}
 
         try:
@@ -267,31 +271,36 @@ class Runtime:
         except Exception:
             result["mcp_package_installed"] = False
 
-        try:
-            from nally.github_oauth import is_github_authenticated
+        if user_id:
+            try:
+                from nally.integrations import IntegrationManager
 
-            result["github_authenticated"] = is_github_authenticated()
-        except Exception:
-            result["github_authenticated"] = False
-
-        try:
-            from nally.mcp.auth import is_gmail_authenticated
-
-            result["gmail_authenticated"] = is_gmail_authenticated()
-        except Exception:
-            result["gmail_authenticated"] = False
-
-        try:
-            from nally.mcp.auth import is_notion_authenticated
-
-            result["notion_authenticated"] = is_notion_authenticated()
-        except Exception:
-            result["notion_authenticated"] = False
+                manager = IntegrationManager()
+                status = manager.status(user_id)
+                result["github_authenticated"] = status.get("github", {}).get("connected", False)
+                result["gmail_authenticated"] = status.get("gmail", {}).get("connected", False)
+                result["notion_authenticated"] = status.get("notion", {}).get("connected", False)
+            except Exception:
+                result["github_authenticated"] = False
+                result["gmail_authenticated"] = False
+                result["notion_authenticated"] = False
+        else:
+            # Fallback: check global tokens (env vars)
+            result["github_authenticated"] = self.is_github_authenticated()
+            result["gmail_authenticated"] = self.is_gmail_authenticated()
+            result["notion_authenticated"] = self.is_notion_authenticated()
 
         return result
 
-    def is_github_authenticated(self) -> bool:
+    def is_github_authenticated(self, user_id: str | None = None) -> bool:
         """Check if GitHub is authenticated for MCP."""
+        if user_id:
+            try:
+                from nally.integrations import IntegrationManager
+
+                return IntegrationManager().is_connected(user_id, "github")
+            except Exception:
+                return False
         try:
             from nally.github_oauth import is_github_authenticated
 
@@ -299,21 +308,37 @@ class Runtime:
         except Exception:
             return False
 
-    def is_gmail_authenticated(self) -> bool:
+    def is_gmail_authenticated(self, user_id: str | None = None) -> bool:
         """Check if Gmail is authenticated for MCP."""
-        try:
-            from nally.mcp.auth import is_gmail_authenticated as _is_gmail
+        if user_id:
+            try:
+                from nally.integrations import IntegrationManager
 
-            return _is_gmail()
+                return IntegrationManager().is_connected(user_id, "gmail")
+            except Exception:
+                return False
+        try:
+            from nally.mcp.auth import _DEFAULT_PROVIDERS
+
+            provider = _DEFAULT_PROVIDERS.get("gmail")
+            return bool(provider and provider.get_headers("gmail", {}))
         except Exception:
             return False
 
-    def is_notion_authenticated(self) -> bool:
+    def is_notion_authenticated(self, user_id: str | None = None) -> bool:
         """Check if Notion is authenticated for MCP."""
-        try:
-            from nally.mcp.auth import is_notion_authenticated as _is_notion
+        if user_id:
+            try:
+                from nally.integrations import IntegrationManager
 
-            return _is_notion()
+                return IntegrationManager().is_connected(user_id, "notion")
+            except Exception:
+                return False
+        try:
+            from nally.mcp.auth import _DEFAULT_PROVIDERS
+
+            provider = _DEFAULT_PROVIDERS.get("notion")
+            return bool(provider and provider.get_headers("notion", {}))
         except Exception:
             return False
 

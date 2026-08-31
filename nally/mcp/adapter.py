@@ -132,12 +132,36 @@ def _has_mcp() -> bool:
         return False
 
 
+def _inject_user_auth(
+    server_name: str, server_cfg: dict[str, Any], user_id: str | None
+) -> dict[str, Any]:
+    """Inject auth into server config. Per-user via IntegrationManager if user_id, else global."""
+    if user_id:
+        try:
+            from nally.integrations import IntegrationManager
+
+            manager = IntegrationManager()
+            headers = manager.get_auth_headers(user_id, server_name)
+            if headers:
+                existing = server_cfg.get("headers") or {}
+                return {**server_cfg, "headers": {**existing, **headers}}
+            env_vars = manager.get_auth_env(user_id, server_name)
+            if env_vars:
+                existing_env = server_cfg.get("env") or {}
+                return {**server_cfg, "env": {**existing_env, **env_vars}}
+        except Exception:
+            pass
+    # Fallback to global inject_auth
+    return inject_auth({server_name: server_cfg}).get(server_name, server_cfg)
+
+
 async def _call_tool_async(
     server_name: str,
     server_cfg: dict[str, Any],
     orig_name: str,
     arguments: dict[str, Any],
     timeout: float = 30.0,
+    user_id: str | None = None,
 ) -> str:
     """Open a short-lived MCP session and call a tool."""
     if not _has_mcp():
@@ -145,14 +169,12 @@ async def _call_tool_async(
 
     from .client import MCPClient
 
-    # Ensure auth headers are present (no-op if already there)
-    cfg = inject_auth({server_name: server_cfg}).get(server_name, server_cfg)
+    # Per-user auth via IntegrationManager, or fallback to global inject_auth
+    cfg = _inject_user_auth(server_name, server_cfg, user_id)
 
     try:
         async with MCPClient(cfg, timeout=timeout) as client:
-            result = await asyncio.wait_for(
-                client.call_tool(orig_name, arguments), timeout=timeout
-            )
+            result = await asyncio.wait_for(client.call_tool(orig_name, arguments), timeout=timeout)
     except BaseException as exc:
         if isinstance(exc, (KeyboardInterrupt, SystemExit)):
             raise
@@ -174,6 +196,7 @@ class MCPTool(Tool):
         input_schema: dict[str, Any] | None,
         server_config: dict[str, Any],
         timeout: float = 30.0,
+        user_id: str | None = None,
     ) -> None:
         params = _mcp_schema_to_params(input_schema)
         namespaced = f"mcp__{server_name}__{orig_name}"
@@ -186,6 +209,7 @@ class MCPTool(Tool):
         self.orig_name = orig_name
         self.server_config = server_config
         self.timeout = timeout
+        self.user_id = user_id
 
     def execute(self, **kwargs: Any) -> str:  # type: ignore[override]
         try:
@@ -196,6 +220,7 @@ class MCPTool(Tool):
                     self.orig_name,
                     kwargs,
                     timeout=self.timeout,
+                    user_id=self.user_id,
                 )
             )
         except Exception as exc:
@@ -208,6 +233,7 @@ async def _load_one_server(
     cfg: dict[str, Any],
     timeout: float,
     deny: set[str],
+    user_id: str | None = None,
 ) -> int:
     """List tools from one server and register. Returns count."""
     if not _has_mcp():
@@ -216,17 +242,15 @@ async def _load_one_server(
 
     from .client import MCPClient
 
-    # Inject auth before connecting (preserves existing headers)
-    enriched = inject_auth({server_name: cfg}).get(server_name, cfg)
+    # Per-user auth or fallback to global inject_auth
+    enriched = _inject_user_auth(server_name, cfg, user_id)
 
     count = 0
     try:
         async with MCPClient(enriched, timeout=timeout) as client:
             cursor: str | None = None
             while True:
-                result = await asyncio.wait_for(
-                    client.list_tools(cursor=cursor), timeout=timeout
-                )
+                result = await asyncio.wait_for(client.list_tools(cursor=cursor), timeout=timeout)
                 for tool in result.tools:
                     if tool.name in deny or f"mcp__{server_name}__{tool.name}" in deny:
                         continue
@@ -240,17 +264,14 @@ async def _load_one_server(
                             else None,
                             server_config=enriched,
                             timeout=timeout,
+                            user_id=user_id,
                         )
                         registry.register(mcp_tool)
                         count += 1
                     except ValueError as ve:
-                        logger.warning(
-                            "Skipping MCP tool %s/%s: %s", server_name, tool.name, ve
-                        )
+                        logger.warning("Skipping MCP tool %s/%s: %s", server_name, tool.name, ve)
                     except Exception as exc:
-                        logger.warning(
-                            "Failed to register %s/%s: %s", server_name, tool.name, exc
-                        )
+                        logger.warning("Failed to register %s/%s: %s", server_name, tool.name, exc)
                 cursor = getattr(result, "nextCursor", None)
                 if not cursor:
                     break
@@ -267,9 +288,16 @@ async def _load_one_server(
 
 
 async def load_mcp_tools(
-    registry: ToolRegistry, config: dict[str, Any] | None = None, timeout: float | None = None
+    registry: ToolRegistry,
+    config: dict[str, Any] | None = None,
+    timeout: float | None = None,
+    user_id: str | None = None,
 ) -> int:
-    """Load tools from all configured MCP servers. Returns total count."""
+    """Load tools from all configured MCP servers. Returns total count.
+
+    If user_id is provided, uses per-user auth via IntegrationManager.
+    Otherwise falls back to global auth via inject_auth.
+    """
     if config is None:
         try:
             from nally.config import MCP_TIMEOUT, get_mcp_servers_config
@@ -303,13 +331,18 @@ async def load_mcp_tools(
         if not isinstance(cfg, dict):
             logger.warning("MCP server '%s' config not a dict — skipping", server_name)
             continue
-        n = await _load_one_server(registry, server_name, cfg, float(timeout), deny)
+        n = await _load_one_server(
+            registry, server_name, cfg, float(timeout), deny, user_id=user_id
+        )
         total += n
     return total
 
 
 def load_mcp_tools_sync(
-    registry: ToolRegistry, config: dict[str, Any] | None = None, timeout: float | None = None
+    registry: ToolRegistry,
+    config: dict[str, Any] | None = None,
+    timeout: float | None = None,
+    user_id: str | None = None,
 ) -> int:
     """Sync wrapper for load_mcp_tools."""
-    return _run_async(load_mcp_tools(registry, config=config, timeout=timeout))
+    return _run_async(load_mcp_tools(registry, config=config, timeout=timeout, user_id=user_id))

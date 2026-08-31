@@ -30,6 +30,8 @@ def build_default_registry(
     ``Tool`` objects. Agent never knows whether a tool came from
     ``filesystem.py`` or an MCP server.
 
+    If user_id is provided, per-user MCP auth is used via IntegrationManager.
+
     Memory tools are only registered when user_id is provided (persistence enabled).
     """
     registry = ToolRegistry(max_output=max_output)
@@ -52,13 +54,9 @@ def build_default_registry(
                     try:
                         from ..mcp.adapter import load_mcp_tools_sync
 
-                        load_mcp_tools_sync(registry, config=cfg)
+                        load_mcp_tools_sync(registry, config=cfg, user_id=user_id)
                     except Exception as exc:
-                        logger.warning(
-                            "MCP tools not loaded: %s: %s", type(exc).__name__, exc
-                        )
+                        logger.warning("MCP tools not loaded: %s: %s", type(exc).__name__, exc)
         except Exception as exc:
-            logger.warning(
-                "MCP setup failed: %s: %s", type(exc).__name__, exc
-            )
+            logger.warning("MCP setup failed: %s: %s", type(exc).__name__, exc)
     return registry

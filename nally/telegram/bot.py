@@ -16,10 +16,11 @@ from typing import Any
 from .formatting import split_message, telegram_format
 from .mcp_ui import (
     build_mcp_keyboard,
-    callback_mcp_connect,
-    callback_mcp_disconnect,
-    callback_notion_connect,
-    callback_notion_disconnect,
+    handle_disconnect_all,
+    handle_mcp_overview,
+    handle_provider_connect,
+    handle_provider_detail,
+    handle_provider_disconnect,
     mcp_status_text,
 )
 from .ux.typing import typing_loop
@@ -266,7 +267,7 @@ async def handle_mcp(update, context) -> None:
         )
         return
 
-    text = mcp_status_text()
+    text = mcp_status_text(telegram_id)
     kb = build_mcp_keyboard()
     await update.message.reply_text(text, reply_markup=kb, parse_mode="HTML")
 
@@ -277,15 +278,27 @@ async def handle_callback(update, context) -> None:
         return
     await query.answer()
 
+    # Resolve user_id from callback
+    user_id = str(query.from_user.id) if query.from_user else None
+    if not user_id:
+        return
+
     data = query.data
-    if data == "mcp_github_connect":
-        await callback_mcp_connect(query, context)
-    elif data == "mcp_github_disconnect":
-        await callback_mcp_disconnect(query)
-    elif data == "mcp_notion_connect":
-        await callback_notion_connect(query, context)
-    elif data == "mcp_notion_disconnect":
-        await callback_notion_disconnect(query)
+
+    # Route MCP callbacks
+    if data == "mcp_back":
+        await handle_mcp_overview(query, user_id)
+    elif data == "mcp_disconnect_all":
+        await handle_disconnect_all(query, user_id)
+    elif data.startswith("mcp_detail_"):
+        provider = data[len("mcp_detail_") :]
+        await handle_provider_detail(query, provider, user_id)
+    elif data.startswith("mcp_connect_"):
+        provider = data[len("mcp_connect_") :]
+        await handle_provider_connect(query, context, provider, user_id)
+    elif data.startswith("mcp_disconnect_"):
+        provider = data[len("mcp_disconnect_") :]
+        await handle_provider_disconnect(query, provider, user_id)
 
 
 async def handle_message(update, context) -> None:
