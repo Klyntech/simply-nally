@@ -460,9 +460,29 @@ def run_bot(token: str | None = None, *, drop_pending_updates: bool = False) -> 
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    # Also handle /clear etc as plain text "/clear" (some clients)
-    logger.info("Telegram bot starting (polling)…")
-    app.run_polling(
-        drop_pending_updates=drop_pending_updates,
-        allowed_updates=["message", "callback_query"],
-    )
+    bot_mode = os.getenv("BOT_MODE", "polling").strip().lower()
+
+    if bot_mode == "webhook":
+        port = int(os.getenv("PORT", "10000"))
+        base_url = os.getenv("WEBHOOK_BASE_URL", "").strip()
+        if not base_url:
+            raise RuntimeError(
+                "WEBHOOK_BASE_URL not set for webhook mode. "
+                "Set it to your public URL (e.g. https://simply-nally.onrender.com)"
+            )
+        # url_path=tok uses the bot token as a secret URL path, blocking random callers
+        logger.info("Telegram bot starting (webhook) on port %d…", port)
+        app.run_webhook(
+            listen="0.0.0.0",
+            port=port,
+            url_path=tok,
+            webhook_url=f"{base_url}/{tok}",
+            drop_pending_updates=drop_pending_updates,
+            allowed_updates=["message", "callback_query"],
+        )
+    else:
+        logger.info("Telegram bot starting (polling)…")
+        app.run_polling(
+            drop_pending_updates=drop_pending_updates,
+            allowed_updates=["message", "callback_query"],
+        )

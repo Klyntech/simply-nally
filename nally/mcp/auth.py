@@ -38,6 +38,7 @@ logger = logging.getLogger(__name__)
 # Token cache — single place for file handling
 # ---------------------------------------------------------------------------
 DEFAULT_CACHE_FILE = os.path.expanduser("~/.config/simply-nally/github_oauth_token.json")
+DEFAULT_GMAIL_CACHE_FILE = os.path.expanduser("~/.config/simply-nally/gmail_oauth_token.json")
 
 
 def _cache_path(path: str | None = None) -> Path:
@@ -249,9 +250,26 @@ def _notion_provider() -> AuthProvider:
     )
 
 
+def _gmail_provider() -> AuthProvider:
+    """Gmail: GMAIL_TOKEN env first, then cached Gmail OAuth file (Google official MCP)."""
+    return ChainedProvider(
+        [
+            EnvTokenProvider(
+                env_vars=["GMAIL_TOKEN", "GMAIL_OAUTH_TOKEN", "GOOGLE_GMAIL_TOKEN"],
+                server_filter="gmail",
+            ),
+            OAuthFileProvider(
+                cache_file=DEFAULT_GMAIL_CACHE_FILE,
+                server_filter="gmail",
+            ),
+        ]
+    )
+
+
 _DEFAULT_PROVIDERS: dict[str, AuthProvider] = {
     "github": _github_provider(),
     "notion": _notion_provider(),
+    "gmail": _gmail_provider(),
 }
 
 
@@ -326,7 +344,34 @@ def get_headers_for_server(
 _STDIO_ENV_MAP: dict[str, str] = {
     "github": "GITHUB_PERSONAL_ACCESS_TOKEN",
     "notion": "NOTION_TOKEN",
+    "gmail": "GMAIL_TOKEN",
 }
+
+
+# ---------------------------------------------------------------------------
+# Gmail-specific helpers (thin wrappers over generic cache with gmail file)
+# ---------------------------------------------------------------------------
+def get_gmail_cached_token() -> str | None:
+    """Return cached Gmail access_token if valid, else None."""
+    return get_cached_token(DEFAULT_GMAIL_CACHE_FILE)
+
+
+def gmail_token_is_valid() -> bool:
+    """Check if Gmail cache contains a non-expired token."""
+    return token_is_valid(DEFAULT_GMAIL_CACHE_FILE)
+
+
+def is_gmail_authenticated() -> bool:
+    """Check if Gmail is authenticated (env or cached file)."""
+    provider = _DEFAULT_PROVIDERS.get("gmail")
+    if provider and provider.get_headers("gmail", {}):
+        return True
+    return False
+
+
+def clear_gmail_token_cache() -> bool:
+    """Remove Gmail cache file. Returns True if removed."""
+    return clear_token_cache(DEFAULT_GMAIL_CACHE_FILE)
 
 
 def inject_auth(
@@ -386,14 +431,19 @@ def inject_auth(
 # These keep github_oauth.py working while it migrates to this module.
 __all__ = [
     "DEFAULT_CACHE_FILE",
+    "DEFAULT_GMAIL_CACHE_FILE",
     "AuthProvider",
     "ChainedProvider",
     "EnvTokenProvider",
     "OAuthFileProvider",
+    "clear_gmail_token_cache",
     "clear_token_cache",
     "get_cached_token",
+    "get_gmail_cached_token",
     "get_headers_for_server",
+    "gmail_token_is_valid",
     "inject_auth",
+    "is_gmail_authenticated",
     "read_token_cache",
     "token_is_valid",
     "write_token_cache",

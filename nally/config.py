@@ -199,6 +199,26 @@ NOTION_TOKEN: str = os.getenv("NOTION_TOKEN", "").strip()
 NOTION_MCP_URL: str = os.getenv("NOTION_MCP_URL", "https://mcp.notion.com/mcp").strip()
 NOTION_MCP_COMMAND: str = os.getenv("NOTION_MCP_COMMAND", "").strip()
 NOTION_MCP_ARGS: str = os.getenv("NOTION_MCP_ARGS", "").strip()
+# Gmail MCP — Google official remote (Streamable HTTP, no npm/npx needed)
+# Docs: https://developers.google.com/workspace/gmail/api/guides/configure-mcp-server
+# Requires: Google Cloud project with Gmail API + gmailmcp.googleapis.com enabled,
+# OAuth consent with scopes gmail.readonly + gmail.compose, and a Web/Desktop OAuth client.
+GMAIL_MCP_URL: str = os.getenv("GMAIL_MCP_URL", "https://gmailmcp.googleapis.com/mcp").strip()
+GMAIL_TOKEN: str = (
+    os.getenv("GMAIL_TOKEN", "").strip()
+    or os.getenv("GMAIL_OAUTH_TOKEN", "").strip()
+    or os.getenv("GOOGLE_GMAIL_TOKEN", "").strip()
+)
+# Optional local stdio fallback (if you run a community gmail-mcp server locally)
+GMAIL_MCP_COMMAND: str = os.getenv("GMAIL_MCP_COMMAND", "").strip()
+GMAIL_MCP_ARGS: str = os.getenv("GMAIL_MCP_ARGS", "").strip()
+# Gmail OAuth app credentials (for `python main.py mcp gmail-login` device flow)
+GMAIL_CLIENT_ID: str = os.getenv("GMAIL_CLIENT_ID", "").strip()
+GMAIL_CLIENT_SECRET: str = os.getenv("GMAIL_CLIENT_SECRET", "").strip()
+GMAIL_OAUTH_SCOPES: str = os.getenv(
+    "GMAIL_OAUTH_SCOPES",
+    "https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.compose",
+).strip()
 
 
 def get_mcp_servers_config() -> dict:
@@ -250,6 +270,16 @@ def get_mcp_servers_config() -> dict:
         nt["url"] = NOTION_MCP_URL
     if nt:
         cfg["notion"] = nt
+    gm: dict = {}
+    if GMAIL_MCP_COMMAND:
+        gm["command"] = GMAIL_MCP_COMMAND
+        if GMAIL_MCP_ARGS:
+            gm["args"] = GMAIL_MCP_ARGS.split()
+    else:
+        # Google official remote — no npm/npx needed, pure HTTP
+        gm["url"] = GMAIL_MCP_URL
+    if gm:
+        cfg["gmail"] = gm
     return cfg
 
 

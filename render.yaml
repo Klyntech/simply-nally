@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: simply-nally
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py telegram
+    envVars:
+      - key: BOT_MODE
+        value: "webhook"
+      - key: PYTHON_VERSION
+        value: "3.11"
+      # Set these manually in Render dashboard:
+      # - key: TELEGRAM_BOT_TOKEN
+      # - key: DATABASE_URL
+      # - key: NALLY_PROVIDER
+      # - key: NVIDIA_API_KEY
+      # - key: WEBHOOK_BASE_URL  (https://simply-nally.onrender.com)
