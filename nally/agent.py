@@ -186,6 +186,18 @@ class Agent:
             # Otherwise continue loop — LLM will see tool results next iteration
 
         # If we exit loop without returning, we hit max iterations
+        # Surface last tool error so the user sees the real failure
+        last_err = ""
+        for m in reversed(self.conversation.get_messages()):
+            if m.get("role") == "tool" and isinstance(m.get("content"), str):
+                c = m["content"]
+                if c.startswith("Error:") or "unknown tool" in c.lower() or "AUTH_REQUIRED" in c:
+                    last_err = c[:500]
+                    break
+        if last_err:
+            return self._stop_message(
+                f"Stopped: reached max iterations ({self.max_iterations}). Last tool error:\n{last_err}"
+            )
         return self._stop_message(
             f"Stopped: reached max iterations ({self.max_iterations}) without final response."
         )

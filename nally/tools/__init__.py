@@ -73,6 +73,14 @@ def build_default_registry(
                             load_mcp_tools_sync(registry, config=cfg, user_id=None)
                     except Exception as exc:
                         logger.warning("MCP tools not loaded: %s: %s", type(exc).__name__, exc)
+                    else:
+                        mcp_count = sum(1 for n in registry.names() if n.startswith("mcp_"))
+                        logger.info("MCP tools loaded: %d (user=%s)", mcp_count, (lookup or "cli")[:12])
+                        if mcp_count == 0 and lookup:
+                            logger.warning(
+                                "0 MCP tools for user %s — check vault credential and NALLY_MCP_ENABLED",
+                                lookup[:12],
+                            )
         except Exception as exc:
             logger.warning("MCP setup failed: %s: %s", type(exc).__name__, exc)
     return registry

@@ -307,9 +307,22 @@ class ToolRegistry:
                 name = preferred[0]
                 tool = self._tools.get(name)
         if tool is None:
-            return f"Error: unknown tool '{name}'", ToolResult.error(
-                f"unknown tool '{name}'", tool_name=name
-            )
+            available = sorted(self._tools.keys())
+            mcp_tools = [n for n in available if n.startswith("mcp_")]
+            hint = ""
+            if mcp_tools:
+                sample = ", ".join(mcp_tools[:12])
+                more = f" (+{len(mcp_tools)-12} more)" if len(mcp_tools) > 12 else ""
+                hint = f" Available MCP tools: {sample}{more}. Use these exact names."
+            elif any(n.startswith("mcp") for n in available):
+                hint = " MCP tools present under different naming."
+            else:
+                hint = (
+                    " No MCP tools are loaded. User must connect the provider "
+                    "(/mcp → Connect GitHub) and NALLY_MCP_ENABLED must be true."
+                )
+            msg = f"Error: unknown tool '{name}'.{hint}"
+            return msg, ToolResult.error(msg, tool_name=name)
 
         # Validate before execution
         ok, err = tool.validate(arguments)
