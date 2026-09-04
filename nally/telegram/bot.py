@@ -638,15 +638,35 @@ def run_bot(token: str | None = None, *, drop_pending_updates: bool = False) -> 
         async def shutdown() -> None:
             await ptb_app.stop()
 
-        starlette_app = Starlette(
-            routes=[
-                Route(f"/{tok}", telegram_webhook, methods=["POST"]),
-                Route("/notion/callback", notion_callback, methods=["GET"]),
-                Route("/oauth/callback/{provider}", oauth_callback, methods=["GET"]),
-            ],
-            on_startup=[startup],
-            on_shutdown=[shutdown],
-        )
+        # Starlette 1.x removed on_startup/on_shutdown — use lifespan
+        try:
+            from contextlib import asynccontextmanager
+
+            @asynccontextmanager
+            async def lifespan(app):  # type: ignore[no-redef]
+                await startup()
+                yield
+                await shutdown()
+
+            starlette_app = Starlette(
+                routes=[
+                    Route(f"/{tok}", telegram_webhook, methods=["POST"]),
+                    Route("/notion/callback", notion_callback, methods=["GET"]),
+                    Route("/oauth/callback/{provider}", oauth_callback, methods=["GET"]),
+                ],
+                lifespan=lifespan,
+            )
+        except Exception:
+            # Fallback for older Starlette (<0.70) that still supports on_startup
+            starlette_app = Starlette(  # type: ignore[call-arg]
+                routes=[
+                    Route(f"/{tok}", telegram_webhook, methods=["POST"]),
+                    Route("/notion/callback", notion_callback, methods=["GET"]),
+                    Route("/oauth/callback/{provider}", oauth_callback, methods=["GET"]),
+                ],
+                on_startup=[startup],  # type: ignore[arg-type]
+                on_shutdown=[shutdown],  # type: ignore[arg-type]
+            )
 
         import uvicorn
 
