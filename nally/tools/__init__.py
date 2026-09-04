@@ -107,6 +107,14 @@ def build_default_registry(
                                 logger.info("GitHub fallback added %d tools", fb)
                         except Exception as exc:
                             logger.warning("GitHub fallback failed: %s", exc)
+                        try:
+                            from ..mcp.notion_fallback import register_notion_fallback_tools
+
+                            nb = register_notion_fallback_tools(registry, lookup)
+                            if nb:
+                                logger.info("Notion fallback added %d tools", nb)
+                        except Exception as exc:
+                            logger.warning("Notion fallback failed: %s", exc)
         except Exception as exc:
             logger.warning("MCP setup failed: %s: %s", type(exc).__name__, exc)
     return registry

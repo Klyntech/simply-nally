@@ -153,6 +153,11 @@ class Agent:
                 register_github_fallback_tools(self.registry, lookup)
             except Exception as exc:
                 logger.warning("GitHub fallback refresh failed: %s", exc)
+            try:
+                from nally.mcp.notion_fallback import register_notion_fallback_tools
+                register_notion_fallback_tools(self.registry, lookup)
+            except Exception as exc:
+                logger.warning("Notion fallback refresh failed: %s", exc)
 
         # Status line for the model
         lines = []
