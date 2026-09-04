@@ -54,9 +54,23 @@ def build_default_registry(
                 cfg = mcp_config if mcp_config is not None else get_mcp_servers_config()
                 if cfg:
                     try:
-                        from ..mcp.adapter import load_mcp_tools_sync
+                        # v2: per-user broker cache (if user scoped) else direct load
+                        lookup = mcp_user_id or user_id
+                        if lookup:
+                            try:
+                                from ..mcp.broker import get_broker
 
-                        load_mcp_tools_sync(registry, config=cfg, user_id=mcp_user_id or user_id)
+                                get_broker().get_tools_sync(lookup, registry=registry, config=cfg)
+                            except Exception as exc:
+                                logger.warning("MCP broker load failed: %s: %s", type(exc).__name__, exc)
+                                # Fallback to direct adapter
+                                from ..mcp.adapter import load_mcp_tools_sync
+
+                                load_mcp_tools_sync(registry, config=cfg, user_id=lookup)
+                        else:
+                            from ..mcp.adapter import load_mcp_tools_sync
+
+                            load_mcp_tools_sync(registry, config=cfg, user_id=None)
                     except Exception as exc:
                         logger.warning("MCP tools not loaded: %s: %s", type(exc).__name__, exc)
         except Exception as exc:

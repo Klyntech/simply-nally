@@ -77,15 +77,29 @@ def build_parser() -> argparse.ArgumentParser:
     tg_p.add_argument("--token", default=None, help="Override TELEGRAM_BOT_TOKEN")
     tg_p.add_argument("--drop-pending", action="store_true", help="Drop pending updates on start")
 
-    # ---- mcp (permanent GitHub device flow + Gmail) ----
-    mcp_p = sub.add_parser("mcp", help="MCP auth — GitHub device flow + Gmail (Google official MCP)")
+    # ---- mcp — browser-first (v2) + legacy fallback ----
+    mcp_p = sub.add_parser("mcp", help="MCP auth — browser-based OAuth (v2)")
     mcp_sub = mcp_p.add_subparsers(dest="mcp_command")
-    mcp_sub.add_parser("status", help="Show MCP status + GitHub/Gmail auth")
-    mcp_sub.add_parser("login", help="Login to GitHub via device flow (permanent)")
-    mcp_sub.add_parser("logout", help="Clear cached GitHub MCP token")
-    mcp_sub.add_parser("gmail-login", help="Login to Gmail via Google OAuth (for Gmail MCP)")
-    mcp_sub.add_parser("gmail-logout", help="Clear cached Gmail MCP token")
-    mcp_sub.add_parser("gmail-status", help="Show Gmail MCP status only")
+    mcp_sub.add_parser("status", help="Show MCP status (vault)")
+    # v2 browser flow
+    c = mcp_sub.add_parser("connect", help="Connect provider via browser (github|gmail|notion)")
+    c.add_argument("provider", nargs="?", default=None, help="Provider name")
+    d = mcp_sub.add_parser("disconnect", help="Disconnect provider")
+    d.add_argument("provider", nargs="?", default=None, help="Provider name")
+    # legacy (deprecated but kept for compat)
+    mcp_sub.add_parser("login", help="Login to GitHub via device flow (deprecated, use mcp connect github)")
+    mcp_sub.add_parser("logout", help="Clear cached GitHub MCP token (deprecated)")
+    mcp_sub.add_parser("gmail-login", help="Login to Gmail via Google OAuth (deprecated, use mcp connect gmail)")
+    mcp_sub.add_parser("gmail-logout", help="Clear cached Gmail MCP token (deprecated)")
+    mcp_sub.add_parser("gmail-status", help="Show Gmail MCP status only (deprecated)")
+
+    # ---- v2 top-level aliases (per plan): login/logout/status/mcp connect ----
+    # Keep `auth login` as canonical, but support `python main.py login` as alias
+    login_p = sub.add_parser("login", help="Login (browser) — aliases `auth login`, optionally --provider")
+    login_p.add_argument("--provider", default=None, help="Provider to connect (google|github|gmail|notion). Omit for main Google login")
+    logout_p = sub.add_parser("logout", help="Logout — aliases `auth logout`")
+    logout_p.add_argument("--provider", default=None, help="Provider to disconnect (omit for main logout)")
+    status_p = sub.add_parser("status", help="Show status (vault + session)")
 
     # Also include chat flags so `main.py auth --help` doesn't confuse, and top-level --help lists them
     p.add_argument("--model", default=None, help=argparse.SUPPRESS)
@@ -270,10 +284,210 @@ def handle_auth(args) -> int:
     return 2
 
 
+def _get_cli_user_id() -> str:
+    """Resolve canonical internal user_id for CLI (v2)."""
+    try:
+        from nally import db
+        from nally.auth import get_current_auth
+
+        if db.is_configured():
+            auth = get_current_auth()
+            if auth and auth.get("user_id"):
+                return auth["user_id"]
+            # Try directory local_cli
+            try:
+                from nally.directory import get_directory
+
+                d = get_directory()
+                u = d.get_or_create_for_cli(local_id="default")
+                if u and u.get("id"):
+                    return u["id"]
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return "_global"
+
+
+def _vault_status_for_user(user_id: str) -> dict[str, dict]:
+    """Return vault status for all providers."""
+    try:
+        from nally.vault import get_vault
+
+        vault = get_vault()
+        result = {}
+        for p in ("github", "gmail", "notion"):
+            cred = vault.get(user_id, p)
+            if cred and not cred.is_expired:
+                result[p] = {"connected": True, "account": cred.provider_metadata.get("account") or cred.subject, "subject": cred.subject}
+            elif cred and cred.is_expired:
+                result[p] = {"connected": False, "account": cred.provider_metadata.get("account") or cred.subject, "reauth_required": True}
+            else:
+                result[p] = {"connected": False, "account": None}
+        return result
+    except Exception:
+        return {}
+
+
+async def _v2_mcp_connect(provider: str, user_id: str) -> int:
+    """Browser flow via AuthBroker + loopback server."""
+    import asyncio
+    import webbrowser
+
+    from nally.auth_broker import get_broker
+    from nally.auth_broker.loopback import LoopbackServer
+
+    # Normalize provider alias
+    if provider == "google":
+        provider = "gmail"
+    if provider not in ("github", "gmail", "notion"):
+        print(f"Unknown provider: {provider}. Supported: github, gmail, notion", file=sys.stderr)
+        return 2
+
+    broker = get_broker()
+    # Start loopback server first to get redirect_uri
+    loopback = LoopbackServer(provider=provider, state="init")
+    redirect_uri = loopback.start()
+    try:
+        session = await broker.start(user_id=user_id, provider=provider, return_surface="cli", redirect_uri=redirect_uri)
+    except Exception as exc:
+        loopback.stop()
+        print(f"Could not start {provider} auth: {exc}", file=sys.stderr)
+        return 1
+
+    # Need to update session's expected state for loopback
+    loopback.state = session.state
+    print(f"\nOpening browser for {provider} authorization…")
+    print(f"If browser doesn't open, visit:\n  {session.authorization_url}\n")
+    print(f"Listening on {redirect_uri} — waiting up to 3 minutes…\n")
+    try:
+        webbrowser.open(session.authorization_url)
+    except Exception:
+        pass
+
+    result = loopback.wait(timeout=180)
+    loopback.stop()
+    if not result:
+        print("Timed out waiting for provider callback. Please try again.", file=sys.stderr)
+        return 1
+    if result.get("error"):
+        print(f"Authorization failed: {result.get('error_description') or result.get('error')}", file=sys.stderr)
+        return 1
+    code = result.get("code")
+    state = result.get("state")
+    if not code or not state:
+        print(f"Invalid callback: {result}", file=sys.stderr)
+        return 1
+    # Hand to broker
+    cb_result = await broker.handle_callback(provider, {"code": code, "state": state})
+    if cb_result.success:
+        print(f"Connected as {cb_result.display_name or cb_result.subject} ({provider})")
+        # Invalidate MCP cache
+        try:
+            from nally.mcp.broker import get_broker as get_mcp_broker
+
+            await get_mcp_broker().invalidate_cache(user_id, provider)
+        except Exception:
+            pass
+        return 0
+    else:
+        print(f"Failed: {cb_result.error} (corr={cb_result.correlation_id})", file=sys.stderr)
+        return 1
+
+
+def _handle_v2_mcp_status() -> int:
+    user_id = _get_cli_user_id()
+    try:
+        from nally.config import MCP_ENABLED
+        from nally.mcp.adapter import _has_mcp as has_mcp_pkg
+
+        print(f"MCP enabled: {MCP_ENABLED}")
+        print(f"mcp package: {'installed' if has_mcp_pkg() else 'not installed (pip install \"simply-nally[mcp]\")'}")
+        status = _vault_status_for_user(user_id)
+        for prov in ("github", "gmail", "notion"):
+            info = status.get(prov, {})
+            if info.get("connected"):
+                print(f"{prov}: connected as {info.get('account')} ({info.get('subject')})")
+            elif info.get("reauth_required"):
+                print(f"{prov}: expired — run `python main.py mcp connect {prov}`")
+            else:
+                print(f"{prov}: not connected — run `python main.py mcp connect {prov}`")
+        try:
+            from nally.config import get_mcp_servers_config
+
+            cfg = get_mcp_servers_config()
+            if cfg:
+                for name, c in cfg.items():
+                    print(f"  server {name}: {c}")
+            else:
+                print("servers: none (check NALLY_MCP_ENABLED)")
+        except Exception as exc:
+            print(f"servers error: {exc}")
+        # Also show legacy fallback if vault empty but legacy tokens exist
+        if not any(v.get("connected") for v in status.values()):
+            try:
+                from nally.integrations.token_store import get_valid_token
+
+                for p in ("github", "gmail", "notion"):
+                    tok = get_valid_token("_global", p) or get_valid_token(user_id, p)
+                    if tok:
+                        print(f"(legacy token found for {p} at ~/.config/simply-nally/tokens)")
+            except Exception:
+                pass
+        return 0
+    except Exception as exc:
+        print(f"status error: {exc}", file=sys.stderr)
+        return 1
+
+
 def handle_mcp(args) -> int:
     """MCP auth — GitHub device flow + Gmail Google OAuth (no npm/npx)."""
     cmd = getattr(args, "mcp_command", None) or "status"
+    # v2 browser flow
+    if cmd in ("connect", "disconnect"):
+        provider = getattr(args, "provider", None)
+        if not provider:
+            print("Usage: python main.py mcp connect <provider>  (github|gmail|notion)", file=sys.stderr)
+            return 2
+        provider = provider.strip().lower()
+        user_id = _get_cli_user_id()
+        try:
+            from nally.config import NALLY_AUTH_V2
 
+            if not NALLY_AUTH_V2:
+                print("NALLY_AUTH_V2 disabled — falling back to legacy device flow", file=sys.stderr)
+                return 2
+        except Exception:
+            pass
+        if cmd == "connect":
+            import asyncio
+
+            return asyncio.run(_v2_mcp_connect(provider, user_id))
+        else:  # disconnect
+            import asyncio
+
+            from nally.auth_broker import get_broker
+
+            async def _do():
+                b = get_broker()
+                ok = await b.revoke(user_id, provider)
+                if ok:
+                    print(f"Disconnected {provider}.")
+                else:
+                    print(f"No connection for {provider} to clear.")
+                return 0
+
+            return asyncio.run(_do())
+
+    if cmd == "status":
+        try:
+            from nally.config import NALLY_AUTH_V2
+
+            if NALLY_AUTH_V2:
+                return _handle_v2_mcp_status()
+        except Exception:
+            pass
+        # fallback to legacy status below (will handle as "status")
     if cmd in ("status", "gmail-status"):
         from nally.config import MCP_ENABLED
         from nally.github_oauth import is_github_authenticated
@@ -517,15 +731,74 @@ def handle_mcp(args) -> int:
     return 2
 
 
+def _handle_login_alias(args) -> int:
+    provider = getattr(args, "provider", None)
+    if provider:
+        p = provider.strip().lower()
+        if p in ("google", "gmail", "github", "notion"):
+            # provider-scoped login is mcp connect
+            import asyncio
+
+            # for google main login, treat as auth login
+            if p == "google":
+                return handle_auth(argparse.Namespace(auth_command="login"))
+            user_id = _get_cli_user_id()
+            return asyncio.run(_v2_mcp_connect(p, user_id))
+        else:
+            print(f"Unknown provider: {provider}", file=sys.stderr)
+            return 2
+    # plain login = auth login (Google)
+    return handle_auth(argparse.Namespace(auth_command="login"))
+
+
+def _handle_logout_alias(args) -> int:
+    provider = getattr(args, "provider", None)
+    if provider:
+        p = provider.strip().lower()
+        if p in ("github", "gmail", "notion", "google"):
+            if p == "google":
+                return handle_auth(argparse.Namespace(auth_command="logout"))
+            user_id = _get_cli_user_id()
+            import asyncio
+            from nally.auth_broker import get_broker
+
+            async def _do():
+                ok = await get_broker().revoke(user_id, p if p != "google" else "gmail")
+                if ok:
+                    print(f"Disconnected {p}.")
+                else:
+                    print(f"No connection for {p} to clear.")
+                return 0
+
+            return asyncio.run(_do())
+        else:
+            print(f"Unknown provider: {provider}", file=sys.stderr)
+            return 2
+    return handle_auth(argparse.Namespace(auth_command="logout"))
+
+
+def _handle_status_alias(args) -> int:
+    # Show both auth status and mcp status
+    handle_auth(argparse.Namespace(auth_command="status"))
+    print("")
+    return _handle_v2_mcp_status()
+
+
 def main(argv: list[str] | None = None) -> int:
     if argv is None:
         argv = sys.argv[1:]
 
     # Dispatch: if first arg is a known subcommand, parse as subcommand; else chat mode.
     # This avoids argparse collision where `hello` is mistaken for a subcommand.
-    if argv and argv[0] in ("auth", "history", "clear", "telegram", "mcp"):
+    if argv and argv[0] in ("auth", "history", "clear", "telegram", "mcp", "login", "logout", "status"):
         parser = build_parser()
         args = parser.parse_args(argv)
+        if args.command == "login":
+            return _handle_login_alias(args)
+        if args.command == "logout":
+            return _handle_logout_alias(args)
+        if args.command == "status":
+            return _handle_status_alias(args)
         if args.command == "auth":
             return handle_auth(args)
         if args.command == "history":
@@ -625,12 +898,17 @@ def main(argv: list[str] | None = None) -> int:
         chat_p = build_chat_parser()
         chat_p.print_help()
         print("\nSubcommands:")
-        print("  auth login|logout|status|init-db   Google OAuth + NEON")
-        print("  mcp status|login|logout|gmail-login|gmail-logout|gmail-status")
-        print("                                     GitHub (device flow) + Gmail (Google MCP, no npm)")
+        print("  login [--provider google|github|gmail|notion]  Browser login (no device code)")
+        print("  logout [--provider ...]                         Disconnect provider")
+        print("  status                                           Vault + session status")
+        print("  auth login|logout|status|init-db   Google OAuth + NEON (aliases)")
+        print("  mcp status                             Vault status")
+        print("  mcp connect <provider>                 Browser connect (github|gmail|notion)")
+        print("  mcp disconnect <provider>              Disconnect")
         print("  history [--json] [--limit N]        Show persisted history")
         print("  clear                               Clear persisted history")
         print("  telegram [--token TOKEN]            Run Telegram bot (polling)")
+        print("\nVault: encrypted per (user_id, provider, subject), AAD-bound, no env fallback in prod.")
         return 0
 
     chat_parser = build_chat_parser()

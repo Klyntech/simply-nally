@@ -403,6 +403,17 @@ class NotionProvider:
         # Notion doesn't dokument revoke endpoint in this flow; best-effort
         return True
 
+    async def identity(self, token: OAuthToken):
+        """Fetch Notion workspace identity."""
+        from nally.auth_broker.models import ProviderIdentity
+
+        name = await self._fetch_workspace_name(token.access_token)
+        # For Notion, use workspace name as both subject and display where possible
+        # Try to fetch more specific bot info via token metadata
+        subject = token.account or name or "notion-workspace"
+        # Token account may be workspace name from callback
+        return ProviderIdentity(subject=subject, display_name=name or token.account, raw={"workspace": name})
+
     def format_auth_headers(self, token: OAuthToken) -> dict[str, str]:
         return {"Authorization": f"Bearer {token.access_token}"}
 

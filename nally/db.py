@@ -184,6 +184,55 @@ CREATE TABLE IF NOT EXISTS facts (
 CREATE INDEX IF NOT EXISTS idx_facts_user_id ON facts(user_id);
 CREATE INDEX IF NOT EXISTS idx_facts_user_type ON facts(user_id, type);
 CREATE INDEX IF NOT EXISTS idx_facts_user_key ON facts(user_id, key);
+
+-- v2 auth tables (MCP login and credential isolation)
+CREATE TABLE IF NOT EXISTS external_identities (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL CHECK (kind IN ('telegram', 'local_cli', 'provider')),
+    provider TEXT,
+    subject TEXT NOT NULL,
+    display_name TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE(user_id, kind, provider, subject)
+);
+CREATE INDEX IF NOT EXISTS idx_external_identities_user ON external_identities(user_id);
+CREATE INDEX IF NOT EXISTS idx_external_identities_lookup ON external_identities(kind, provider, subject);
+
+CREATE TABLE IF NOT EXISTS login_sessions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    provider TEXT NOT NULL,
+    state_hash BYTEA NOT NULL UNIQUE,
+    pkce_verifier_encrypted BYTEA NOT NULL,
+    redirect_uri TEXT NOT NULL,
+    requested_scopes JSONB NOT NULL DEFAULT '[]',
+    return_surface TEXT NOT NULL CHECK (return_surface IN ('cli', 'telegram', 'web')),
+    return_reference TEXT,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'succeeded', 'denied', 'failed', 'expired', 'consumed')),
+    expires_at TIMESTAMPTZ NOT NULL,
+    consumed_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_login_sessions_state ON login_sessions(state_hash);
+CREATE INDEX IF NOT EXISTS idx_login_sessions_user ON login_sessions(user_id, provider, status);
+
+CREATE TABLE IF NOT EXISTS credentials (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    provider TEXT NOT NULL,
+    subject TEXT NOT NULL,
+    access_token_encrypted BYTEA NOT NULL,
+    refresh_token_encrypted BYTEA,
+    token_type TEXT NOT NULL DEFAULT 'Bearer',
+    scopes JSONB NOT NULL DEFAULT '[]',
+    expires_at TIMESTAMPTZ,
+    provider_metadata JSONB NOT NULL DEFAULT '{}',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE(user_id, provider, subject)
+);
+CREATE INDEX IF NOT EXISTS idx_credentials_user ON credentials(user_id, provider);
 """
 
 
@@ -250,6 +299,13 @@ def _migrate_add_facts(conn) -> None:
             conn.commit()
 
 
+def _migrate_add_v2(conn) -> None:
+    """Idempotent migration: create v2 auth tables if missing (for older DBs)."""
+    with conn.cursor() as cur:
+        cur.execute(SCHEMA_SQL)
+        conn.commit()
+
+
 def init_schema(conn=None) -> None:
     """Create tables if they do not exist. Safe to call multiple times."""
     close = False
@@ -265,6 +321,7 @@ def init_schema(conn=None) -> None:
         conn.commit()
         _migrate_add_telegram(conn)
         _migrate_add_facts(conn)
+        _migrate_add_v2(conn)
     finally:
         if close:
             conn.close()

@@ -155,6 +155,20 @@ def get_system_prompt() -> str:
 
 
 # ---------------------------------------------------------------------------
+# v2 Auth — browser-first, vault, session isolation
+# ---------------------------------------------------------------------------
+NALLY_AUTH_V2: bool = os.getenv("NALLY_AUTH_V2", "true").strip().lower() in ("1", "true", "yes", "on")
+NALLY_VAULT_MASTER_KEY: str = os.getenv("NALLY_VAULT_MASTER_KEY", "").strip()
+OAUTH_BASE_URL: str = (os.getenv("OAUTH_BASE_URL", "").strip() or os.getenv("WEBHOOK_BASE_URL", "").strip())
+# Single-user dev mode: explicit env token fallback (disabled by default in multi-user)
+NALLY_ALLOW_ENV_FALLBACK: bool = os.getenv("NALLY_ALLOW_ENV_FALLBACK", "false").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+
+# ---------------------------------------------------------------------------
 # Telegram
 # ---------------------------------------------------------------------------
 TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()

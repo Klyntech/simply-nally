@@ -13,27 +13,29 @@ A minimalist AI agent framework implementing a ReAct (Reason + Act) loop with bu
 - Prefer explicit code over abstractions. Prefer stdlib over dependencies.
 - `BUILD → TEST → UNDERSTAND → HARDEN → SIMPLIFY → REPEAT`
 
-## What's New in v1.0
+## What's New in v2 (MCP Login & Credential Isolation)
 
-- **Telegram Bot** — Run as a Telegram bot with `/link` device flow authentication
-- **MCP Integrations** — GitHub, Gmail, and Notion via Model Context Protocol
-- **Memory System** — Per-user facts and preferences with `remember`/`recall`/`forget`
-- **OAuth Flows** — Google, GitHub, and Notion authentication (Desktop + Device flows)
-- **NEON Persistence** — Cloud-hosted session history and user data
-- **Render Deployment** — One-click deployment with `render.yaml`
+- **Browser-only OAuth** — One link, choose account in browser, done. No device codes, no polling, no `enter code` screens.
+- **Credential Vault** — Encrypted-at-rest per-user tokens with envelope encryption (AAD binding). Raw tokens never reach Telegram, LLM prompts, or logs.
+- **AuthBroker** — Single login session lifecycle with atomic one-time callback consumption, state + PKCE verification, and deterministic failure pages.
+- **MCP Broker** — Per-user tool cache with invalidation on connect/disconnect. MCP transport injects ephemeral headers/env at call time.
+- **UserDirectory** — Canonical internal UUID linking Telegram, CLI, and provider identities.
+- **MCP Integrations** — GitHub, Gmail, and Notion via browser OAuth + PKCE + discovery.
+- **NEON Persistence** — Cloud session history + `login_sessions`/`credentials`/`external_identities` tables.
+- **Render Deployment** — Single HTTPS callback `https://your-domain/oauth/callback/{provider}`.
 
 ## Features
 
 - **ReAct Agent Loop** — Reason + Act pattern with tool validation and safety checks
 - **Multi-Provider LLM** — OpenAI, Groq, NVIDIA NIM, Opencode (Zen) with provider defaults
 - **Built-in Tools** — Filesystem, shell, web search, URL fetch, memory (6+ tools)
-- **MCP Support** — Model Context Protocol for GitHub, Gmail, Notion integrations
-- **Authentication** — Google OAuth (Desktop + Device), GitHub Device Flow, Notion PKCE
-- **Session Persistence** — NEON Postgres with automatic schema management
-- **Telegram Bot** — Polling + webhook modes with `/link` device flow
+- **MCP Support** — Model Context Protocol for GitHub, Gmail, Notion (broker + vault)
+- **Authentication** — Browser-only OAuth (Auth Code + PKCE, RFC 8252/9700), no device flow
+- **Session Persistence** — NEON Postgres with encrypted credentials + login sessions
+- **Telegram Bot** — Polling + webhook modes with browser link (`/mcp` → one HTTPS link)
 - **Memory System** — Per-user facts, preferences, and command handling
-- **CLI Interface** — Interactive mode, single-shot commands, and subcommand system
-- **Testing** — pytest + pytest-asyncio with comprehensive test suite
+- **CLI Interface** — Browser login, `mcp connect/disconnect/status`, loopback callback
+- **Testing** — pytest + pytest-asyncio with vault/credential isolation tests
 
 ## Quick Start
 
@@ -66,26 +68,27 @@ python main.py [prompt] [--model MODEL] [--max-iterations N] [--no-persist]
 
 ### Subcommands
 ```bash
-# Authentication
-python main.py auth login        # Google OAuth (opens browser)
-python main.py auth logout       # Clear local session
-python main.py auth status       # Show login/session status
-python main.py auth init-db      # Initialize NEON Postgres schema
+# Authentication (browser-only)
+python main.py login [--provider google|github|gmail|notion]  # Opens browser, choose account
+python main.py logout [--provider google|github|gmail|notion]
+python main.py status                # Vault + session status
+python main.py auth login            # Alias for `login` (Google)
+python main.py auth logout
+python main.py auth status
+python main.py auth init-db          # Initialize NEON Postgres schema
 
 # Session History
 python main.py history [--json] [--limit N]
-python main.py clear             # Clear persisted history
+python main.py clear                 # Clear persisted history
 
 # Telegram Bot
 python main.py telegram [--token TOKEN] [--drop-pending]
 
-# MCP Integrations
-python main.py mcp status        # Show MCP + GitHub/Gmail auth status
-python main.py mcp login         # GitHub device flow (permanent)
-python main.py mcp logout        # Clear cached GitHub token
-python main.py mcp gmail-login   # Gmail OAuth (device flow)
-python main.py mcp gmail-logout  # Clear cached Gmail token
-python main.py mcp gmail-status  # Gmail MCP status only
+# MCP — browser-only (v2)
+python main.py mcp status            # Vault status for all providers
+python main.py mcp connect <provider>   # github|gmail|notion — opens browser or prints URL
+python main.py mcp disconnect <provider>
+python main.py mcp status            # Same as `status`
 ```
 
 ### Interactive Mode Commands
@@ -98,61 +101,41 @@ python main.py mcp gmail-status  # Gmail MCP status only
 
 ```
 simply-nally/
-├── main.py                          # CLI entry point (675 lines)
-├── pyproject.toml                   # Project metadata, deps, ruff/pytest config
-├── requirements.txt                 # Flat dependency list
-├── render.yaml                      # Render.com deployment config
-├── .env.example                     # Full env reference (106 lines)
+├── main.py
+├── pyproject.toml
+├── .env.example                     # Vault + browser OAuth env
 ├── nally/
-│   ├── __init__.py                  # __version__ = "1.0.0"
-│   ├── config.py                    # Env-based settings, provider defaults, system prompt
-│   ├── llm.py                       # Thin OpenAI-compatible LLM client wrapper
-│   ├── agent.py                     # ReAct agent loop (core logic)
-│   ├── conversation.py              # Message history + optional persistence bridge
-│   ├── session.py                   # SessionStore — bridges Agent ↔ NEON
-│   ├── db.py                        # Postgres schema, CRUD (users, sessions, messages, facts)
-│   ├── auth.py                      # Google OAuth (Desktop + Device flows)
-│   ├── github_oauth.py              # GitHub OAuth device flow
-│   ├── notion_oauth.py              # Notion OAuth (PKCE)
-│   ├── runtime.py                   # Runtime utilities
-│   ├── tools/
-│   │   ├── base.py                  # Tool base class + ToolRegistry + validation
-│   │   ├── filesystem.py            # read_file, write_file, list_dir
-│   │   ├── shell.py                 # run_command
-│   │   ├── websearch.py             # web_search (DuckDuckGo)
-│   │   ├── fetch.py                 # fetch (URL reader)
-│   │   ├── memory.py                # Memory tools (remember, recall, forget)
-│   │   └── mcp/                     # MCP tool loading
-│   ├── integrations/
-│   │   ├── base.py                  # Integration base class
-│   │   ├── manager.py               # IntegrationManager
-│   │   ├── token_store.py           # File-based token cache (~/.config/simply-nally/tokens/)
-│   │   ├── github.py                # GitHub MCP integration
-│   │   ├── gmail.py                 # Gmail MCP integration
-│   │   └── notion.py                # Notion MCP integration
+│   ├── config.py                    # Env, providers, vault master key
+│   ├── db.py                        # Postgres schema (users, sessions, messages, facts, login_sessions, credentials, external_identities)
+│   ├── directory.py                 # UserDirectory — canonical UUID linking
+│   ├── vault/
+│   │   ├── __init__.py              # CredentialVault (encrypted, DB + file fallback)
+│   │   └── crypto.py                # Envelope encryption (AES-GCM + AAD binding)
+│   ├── auth_broker/
+│   │   ├── __init__.py              # AuthBroker — single browser login lifecycle
+│   │   ├── models.py                # LoginSession, ProviderIdentity
+│   │   └── loopback.py              # CLI loopback server (127.0.0.1 ephemeral port)
+│   ├── oauth/
+│   │   ├── providers/               # github, google (gmail), notion (+ PKCE/discovery)
+│   │   └── ...
 │   ├── mcp/
-│   │   ├── adapter.py               # MCP tool discovery + normalization
-│   │   ├── auth.py                  # MCP auth injection
+│   │   ├── broker.py                # MCPConnectionBroker + per-user tool cache
+│   │   ├── adapter.py               # MCP tool discovery (vault-based auth injection)
 │   │   └── client.py                # MCP client
-│   ├── memory/
-│   │   ├── models.py                # Memory data models
-│   │   ├── manager.py               # MemoryManager (retrieve, store, handle commands)
-│   │   └── store.py                 # Memory store
-│   └── telegram/
-│       ├── bot.py                   # Bot entry point (polling + webhook)
-│       ├── formatting.py            # Message formatting
-│       ├── mcp_ui.py                # MCP status UI for Telegram
-│       └── ux/                      # UX helpers
+│   ├── tools/                       # registry + filesystem/shell/web/memory
+│   ├── memory/                      # MemoryManager + store
+│   ├── telegram/
+│   │   ├── bot.py                   # Webhook + polling, central /oauth/callback
+│   │   ├── mcp_ui.py                # Browser-only MCP UI (one HTTPS link, vault polling)
+│   │   └── ux/
+│   └── agent.py / conversation.py / session.py / llm.py
 └── tests/
     ├── conftest.py
-    ├── test_agent.py
-    ├── test_config.py
-    ├── test_memory.py
-    ├── test_persist.py
-    ├── test_telegram.py
-    ├── test_tools.py
-    └── test_web.py
+    └── test_*.py
 ```
+
+> Legacy `nally/integrations/`, `github_oauth.py`, `notion_oauth.py`, and `mcp/auth.py` device-flow code remain for
+> migration grace period but are not used when `NALLY_AUTH_V2=true` (default). They will be removed.
 
 ## Built-in Tools
 
@@ -174,34 +157,30 @@ simply-nally/
 
 ## Integrations
 
-### Google OAuth (Desktop Flow)
-1. Create OAuth client at [Google Cloud Console](https://console.cloud.google.com/apis/credentials)
-2. Set `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` in `.env`
-3. Run `python main.py auth login` — opens browser for authentication
+### Google OAuth (Browser Flow, RFC 8252)
+1. Create OAuth client (Web Application) at [Google Cloud Console](https://console.cloud.google.com/apis/credentials)
+2. Add redirect: `https://your-domain/oauth/callback/gmail` (prod) or rely on loopback for CLI
+3. Set `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` + `OAUTH_BASE_URL` (prod) in `.env`
+4. Run `python main.py login` — opens browser, choose account, done. No device code.
 
 ### Telegram Bot
-1. Create bot via [@BotFather](https://t.me/BotFather) on Telegram
-2. Set `TELEGRAM_BOT_TOKEN` in `.env`
-3. Run `python main.py telegram` (polling) or deploy with `render.yaml` (webhook)
-4. Users authenticate via `/link` command using device flow
+1. Create bot via [@BotFather](https://t.me/BotFather)
+2. Set `TELEGRAM_BOT_TOKEN` + `OAUTH_BASE_URL=https://your-domain` in `.env`
+3. Run `python main.py telegram` (polling) or deploy via `render.yaml` (webhook)
+4. In Telegram: `/mcp` → tap `Connect GitHub/Gmail/Notion` → one HTTPS link → browser → choose account → success message.
 
-### MCP Integrations
-Enable with `NALLY_MCP_ENABLED=true` in `.env`:
+### MCP Integrations (Browser-only)
+Enable with `NALLY_MCP_ENABLED=true` and set provider client IDs + `OAUTH_BASE_URL`:
 
-**GitHub MCP:**
 ```bash
-python main.py mcp login     # Device flow (permanent token)
-python main.py mcp status    # Check authentication
+python main.py mcp status                    # Vault status
+python main.py mcp connect github            # Browser → choose GitHub account → cached
+python main.py mcp connect gmail             # Browser → choose Google account
+python main.py mcp connect notion            # PKCE + discovery
+python main.py mcp disconnect github
 ```
 
-**Gmail MCP:**
-```bash
-python main.py mcp gmail-login   # Google OAuth device flow
-python main.py mcp gmail-status  # Check Gmail auth
-```
-
-**Notion MCP:**
-- Set `NOTION_TOKEN` (local stdio) or `NOTION_MCP_URL` (remote) in `.env`
+Tokens are encrypted per `(user_id, provider, subject)` and injected only at MCP transport time. No env fallback in multi-user mode unless `NALLY_ALLOW_ENV_FALLBACK=true`.
 
 ### Memory System
 - Per-user facts stored in NEON Postgres

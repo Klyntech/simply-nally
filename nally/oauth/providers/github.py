@@ -208,6 +208,31 @@ class GitHubProvider:
         # for OAuth App tokens. User must revoke manually.
         return True
 
+    async def identity(self, token: OAuthToken):
+        """Fetch provider identity for credential subject binding."""
+        from nally.auth_broker.models import ProviderIdentity
+
+        try:
+            resp = await asyncio.to_thread(
+                requests.get,
+                _USER_API_URL,
+                headers={
+                    "Authorization": f"Bearer {token.access_token}",
+                    "Accept": "application/json",
+                },
+                timeout=10,
+            )
+            if resp.ok:
+                info = resp.json()
+                subject = str(info.get("id") or info.get("login") or token.account or "github-user")
+                display = info.get("login") or info.get("name") or token.account
+                return ProviderIdentity(subject=subject, display_name=display, raw=info)
+        except Exception:
+            pass
+        # Fallback to token account
+        subj = token.account or "github-user"
+        return ProviderIdentity(subject=subj, display_name=token.account, raw={})
+
     def format_auth_headers(self, token: OAuthToken) -> dict[str, str]:
         """Format token as Authorization header."""
         return {"Authorization": f"Bearer {token.access_token}"}

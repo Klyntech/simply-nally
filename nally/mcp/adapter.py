@@ -138,26 +138,40 @@ def _inject_user_auth(
     user_id: str | None,
     mcp_user_id: str | None = None,
 ) -> dict[str, Any]:
-    """Inject auth into server config with strict isolation.
+    """Inject auth into server config with strict isolation — v2 vault-only.
 
     Security invariant:
-        user_id != None → ONLY TokenStore(user_id, provider), never global fallback
-        user_id == None → system/CLI credential via environment
+        user_id != None → ONLY vault credential (never env fallback)
+        user_id == None → system/CLI credential via vault file fallback or env (if allowed)
 
     This is the critical security boundary for multi-user SaaS.
     """
     lookup_id = mcp_user_id or user_id
     if lookup_id:
-        # USER-SCOPED: must use per-user credentials only, strict isolation
-        # Query TokenStore directly — never consult environment variables
+        # USER-SCOPED: strict isolation via CredentialVault
         try:
-            # Try new canonical TokenStore
+            from nally.vault import get_vault
+
+            vault = get_vault()
+            transport = vault.get_for_transport(lookup_id, server_name, resource=server_name)
+            if transport:
+                if transport.headers:
+                    existing = server_cfg.get("headers") or {}
+                    return {**server_cfg, "headers": {**existing, **transport.headers}}
+                if transport.env:
+                    existing_env = server_cfg.get("env") or {}
+                    return {**server_cfg, "env": {**existing_env, **transport.env}}
+        except Exception as exc:
+            logger.debug("Vault lookup failed for %s/%s: %s", lookup_id, server_name, exc)
+
+        # Fallback to legacy stores for clean-break migration grace period
+        # (will be removed in Phase E). Still strict, no env fallback.
+        try:
             from nally.oauth.token_store import TokenStore as OAuthTokenStore
 
             store = OAuthTokenStore()
             token = store.get_valid(lookup_id, server_name)
             if token:
-                # Format via provider if available, else generic Bearer
                 try:
                     from nally.oauth.manager import OAuthManager
                     from nally.oauth.providers.github import GitHubProvider
@@ -178,9 +192,7 @@ def _inject_user_auth(
                         return {**server_cfg, "env": {**existing_env, **env_vars}}
                 except Exception:
                     pass
-                # Fallback formatting if provider not available
                 if server_cfg.get("command"):
-                    # stdio transport
                     key_map = {
                         "github": "GITHUB_PERSONAL_ACCESS_TOKEN",
                         "gmail": "GMAIL_TOKEN",
@@ -196,11 +208,7 @@ def _inject_user_auth(
                         "headers": {**existing, "Authorization": f"Bearer {token.access_token}"},
                     }
         except Exception as exc:
-            logger.debug(
-                "OAuth TokenStore lookup failed for %s/%s: %s", lookup_id, server_name, exc
-            )
-
-        # Try legacy token_store for backward compat (still strict, no env fallback)
+            logger.debug("OAuth TokenStore fallback failed for %s/%s: %s", lookup_id, server_name, exc)
         try:
             from nally.integrations import token_store as legacy_store
 
@@ -222,16 +230,53 @@ def _inject_user_auth(
                         "headers": {**existing, "Authorization": f"Bearer {legacy_token}"},
                     }
         except Exception as exc:
-            logger.debug("Legacy token lookup failed for %s/%s: %s", lookup_id, server_name, exc)
+            logger.debug("Legacy token fallback failed for %s/%s: %s", lookup_id, server_name, exc)
 
-        # No user credential found → FAIL CLOSED, do not fallback to global
+        # No vault credential found → FAIL CLOSED, do not fallback to global
         logger.debug(
             "No credential for user %s provider %s — returning unauthenticated config (AUTH_REQUIRED on use)",
             lookup_id,
             server_name,
         )
         return dict(server_cfg)
-    # SYSTEM/CLI MODE: no user_id → allow environment credential
+    # SYSTEM/CLI MODE: vault file fallback first, then env if allowed
+    try:
+        from nally.vault import get_vault
+
+        vault = get_vault()
+        # CLI uses synthetic _global or local user? Try _global file vault
+        for try_id in ("_global", "default", "local"):
+            transport = vault.get_for_transport(try_id, server_name, resource=server_name)
+            if transport:
+                if transport.headers:
+                    existing = server_cfg.get("headers") or {}
+                    return {**server_cfg, "headers": {**existing, **transport.headers}}
+                if transport.env:
+                    existing_env = server_cfg.get("env") or {}
+                    return {**server_cfg, "env": {**existing_env, **transport.env}}
+    except Exception:
+        pass
+    # Env fallback only if explicitly allowed (single-user dev mode)
+    try:
+        from nally.config import NALLY_ALLOW_ENV_FALLBACK
+
+        if NALLY_ALLOW_ENV_FALLBACK:
+            return inject_auth({server_name: server_cfg}).get(server_name, server_cfg)
+    except Exception:
+        pass
+    # Default: still allow env for CLI to avoid breaking existing single-user setups,
+    # but log warning when vault master key is configured (indicating multi-user intent)
+    try:
+        from nally.vault.crypto import is_encryption_configured
+
+        if is_encryption_configured():
+            logger.warning(
+                "CLI credential fallback to env for %s while vault encryption configured — set NALLY_ALLOW_ENV_FALLBACK=true to allow explicitly",
+                server_name,
+            )
+            # Still allow but this will be removed in production hardening
+    except Exception:
+        pass
     return inject_auth({server_name: server_cfg}).get(server_name, server_cfg)
 
 
@@ -242,12 +287,19 @@ def _has_user_credential(
 ) -> bool:
     """Check if user has a valid credential for a server.
 
-    Strict check — only TokenStore, no env fallback. Used to fail fast
-    with AUTH_REQUIRED instead of attempting a connection that will fail.
+    Strict check — vault first, then legacy stores, no env fallback.
     """
     lookup_id = mcp_user_id or user_id
     if not lookup_id:
         return True  # CLI mode: no check, allow
+    try:
+        from nally.vault import get_vault
+
+        vault = get_vault()
+        if vault.get_valid(lookup_id, server_name) is not None:
+            return True
+    except Exception:
+        pass
     try:
         from nally.oauth.token_store import TokenStore as OAuthTokenStore
 

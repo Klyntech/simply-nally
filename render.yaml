@@ -16,3 +16,10 @@ services:
       # - key: NALLY_PROVIDER
       # - key: NVIDIA_API_KEY
       # - key: WEBHOOK_BASE_URL  (https://simply-nally.onrender.com)
+      # - key: OAUTH_BASE_URL    (same as WEBHOOK_BASE_URL, for OAuth callbacks)
+      # - key: NALLY_VAULT_MASTER_KEY (generate: python -m nally.vault.crypto)
+      # - key: GITHUB_CLIENT_ID / GITHUB_CLIENT_SECRET (Web flow, callback: https://your-domain/oauth/callback/github)
+      # - key: GMAIL_CLIENT_ID / GMAIL_CLIENT_SECRET (or GOOGLE_CLIENT_ID, callback: https://your-domain/oauth/callback/gmail)
+      # - key: NOTION_CLIENT_ID / NOTION_CLIENT_SECRET (optional, dynamic registration if not set)
+      # - key: NALLY_MCP_ENABLED
+      #   value: "true"

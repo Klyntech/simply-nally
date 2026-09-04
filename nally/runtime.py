@@ -273,13 +273,15 @@ class Runtime:
 
         if user_id:
             try:
-                from nally.integrations import IntegrationManager
+                from nally.vault import get_vault
 
-                manager = IntegrationManager()
-                status = manager.status(user_id)
-                result["github_authenticated"] = status.get("github", {}).get("connected", False)
-                result["gmail_authenticated"] = status.get("gmail", {}).get("connected", False)
-                result["notion_authenticated"] = status.get("notion", {}).get("connected", False)
+                vault = get_vault()
+                for prov in ("github", "gmail", "notion"):
+                    cred = vault.get_valid(user_id, prov)
+                    result[f"{prov}_authenticated"] = cred is not None
+                # Fallback keys for compat
+                if "gmail_authenticated" not in result:
+                    result["gmail_authenticated"] = result.get("gmail_authenticated", False)
             except Exception:
                 result["github_authenticated"] = False
                 result["gmail_authenticated"] = False
@@ -293,14 +295,21 @@ class Runtime:
         return result
 
     def is_github_authenticated(self, user_id: str | None = None) -> bool:
-        """Check if GitHub is authenticated for MCP."""
+        """Check if GitHub is authenticated for MCP — vault first."""
         if user_id:
             try:
-                from nally.integrations import IntegrationManager
+                from nally.vault import get_vault
 
-                return IntegrationManager().is_connected(user_id, "github")
+                return get_vault().get_valid(user_id, "github") is not None
             except Exception:
                 return False
+        try:
+            from nally.vault import get_vault
+
+            if get_vault().get_valid("_global", "github") is not None:
+                return True
+        except Exception:
+            pass
         try:
             from nally.github_oauth import is_github_authenticated
 
@@ -309,15 +318,21 @@ class Runtime:
             return False
 
     def is_gmail_authenticated(self, user_id: str | None = None) -> bool:
-        """Check if Gmail is authenticated for MCP."""
+        """Check if Gmail is authenticated for MCP — vault first."""
         if user_id:
             try:
-                from nally.integrations import IntegrationManager
+                from nally.vault import get_vault
 
-                return IntegrationManager().is_connected(user_id, "gmail")
+                return get_vault().get_valid(user_id, "gmail") is not None
             except Exception:
                 return False
-        # Fallback: check env vars
+        try:
+            from nally.vault import get_vault
+
+            if get_vault().get_valid("_global", "gmail") is not None:
+                return True
+        except Exception:
+            pass
         import os
 
         env_token = (
@@ -335,15 +350,21 @@ class Runtime:
             return False
 
     def is_notion_authenticated(self, user_id: str | None = None) -> bool:
-        """Check if Notion is authenticated for MCP."""
+        """Check if Notion is authenticated for MCP — vault first."""
         if user_id:
             try:
-                from nally.integrations import IntegrationManager
+                from nally.vault import get_vault
 
-                return IntegrationManager().is_connected(user_id, "notion")
+                return get_vault().get_valid(user_id, "notion") is not None
             except Exception:
                 return False
-        # Fallback: check env vars
+        try:
+            from nally.vault import get_vault
+
+            if get_vault().get_valid("_global", "notion") is not None:
+                return True
+        except Exception:
+            pass
         import os
 
         env_token = os.getenv("NOTION_TOKEN", "").strip()

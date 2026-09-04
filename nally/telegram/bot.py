@@ -564,38 +564,66 @@ def run_bot(token: str | None = None, *, drop_pending_updates: bool = False) -> 
             return await notion_callback_route(request)
 
         async def oauth_callback(request: Request) -> Response:
-            """Centralized OAuth callback for all providers.
+            """Centralized v2 OAuth callback — AuthBroker only, atomic, safe to show.
 
             Route: /oauth/callback/{provider}?code=...&state=...
-            Uses shared OAuthManager and OAuthFlowStore for isolation.
             """
             from starlette.responses import HTMLResponse
 
-            from nally.oauth.callback import handle_oauth_callback
-            from nally.oauth.manager import get_oauth_manager
+            from nally.auth_broker import get_broker
 
             provider = request.path_params.get("provider", "").lower()
             # Normalize gmail vs google
             if provider == "google":
                 provider = "gmail"
-            if provider not in ("github", "gmail", "notion"):
+            if provider not in ("github", "gmail", "notion", "google"):
                 return HTMLResponse("<h1>Unknown provider</h1>", status_code=404)
+            if provider == "google":
+                provider = "gmail"
 
-            # Extract query params
             params = dict(request.query_params)
-            manager = get_oauth_manager()
-            success, msg = await handle_oauth_callback(provider, params, manager)
+            # Redact sensitive query string from logs
+            import hashlib
 
-            if success:
-                # Clear cached agent for the user so next message loads new tools
-                # The user_id is not directly available here, but TokenStore will be used on next agent creation
-                # Background cleanup of flow is already done via consume()
+            # Never log code or full query
+            logger.info("oauth callback hit provider=%s has_code=%s has_state=%s", provider, "code" in params, "state" in params)
+
+            broker = get_broker()
+            # Try AuthBroker first (v2)
+            try:
+                result = await broker.handle_callback(provider, params)
+                if result.success:
+                    return HTMLResponse(
+                        f"<html><body><h1>Connected</h1><p>Successfully connected {provider.capitalize()} as {result.display_name or result.subject}</p><p>You can return to Telegram.</p></body></html>"
+                    )
+                else:
+                    # Generic failure page (no token leakage)
+                    return HTMLResponse(
+                        f"<html><body><h1>Authorization failed</h1><p>{result.error or 'Please try again.'}</p><p>Correlation: {result.correlation_id or ''}</p></body></html>",
+                        status_code=400,
+                    )
+            except Exception as exc:
+                logger.warning("v2 callback failed, trying legacy: %s", exc)
+            # Legacy fallback for old in-flight flows (pre-v2)
+            try:
+                from nally.oauth.callback import handle_oauth_callback
+                from nally.oauth.manager import get_oauth_manager
+
+                manager = get_oauth_manager()
+                success, msg = await handle_oauth_callback(provider, params, manager)
+                if success:
+                    return HTMLResponse(
+                        f"<html><body><h1>Success!</h1><p>{msg}</p><p>You can return to Telegram and send a message.</p></body></html>"
+                    )
+                else:
+                    return HTMLResponse(
+                        f"<html><body><h1>Error</h1><p>{msg}</p></body></html>", status_code=400
+                    )
+            except Exception as exc2:
+                logger.warning("legacy callback also failed: %s", exc2)
                 return HTMLResponse(
-                    f"<html><body><h1>Success!</h1><p>{msg}</p><p>You can return to Telegram and send a message.</p></body></html>"
-                )
-            else:
-                return HTMLResponse(
-                    f"<html><body><h1>Error</h1><p>{msg}</p></body></html>", status_code=400
+                    "<html><body><h1>Error</h1><p>Invalid callback. Please try connecting again.</p></body></html>",
+                    status_code=400,
                 )
 
         async def startup() -> None:

@@ -73,12 +73,30 @@ def build_provider_keyboard(provider: str, connected: bool) -> Any:
 # ---------------------------------------------------------------------------
 
 
-def mcp_status_text(user_id: str) -> str:
-    """Build the status text for /mcp overview."""
-    from nally.integrations import IntegrationManager
+def _get_vault_status(user_id: str) -> dict[str, dict]:
+    """Vault-backed status for user (no IntegrationManager)."""
+    try:
+        from nally.vault import get_vault
 
-    manager = IntegrationManager()
-    status = manager.status(user_id)
+        vault = get_vault()
+        out = {}
+        for p, _ in _PROVIDERS:
+            cred = vault.get(user_id, p)
+            if cred and not cred.is_expired:
+                out[p] = {"connected": True, "account": cred.provider_metadata.get("account") or cred.subject}
+            elif cred:
+                # expired still show as disconnected but with account
+                out[p] = {"connected": False, "account": cred.provider_metadata.get("account") or cred.subject, "reauth_required": True}
+            else:
+                out[p] = {"connected": False, "account": None}
+        return out
+    except Exception:
+        return {p: {"connected": False, "account": None} for p, _ in _PROVIDERS}
+
+
+def mcp_status_text(user_id: str) -> str:
+    """Build the status text for /mcp overview — vault only."""
+    status = _get_vault_status(user_id)
 
     # Keep legacy phrase for tests/UX — indicates MCP is available
     # Always include for backward compat with tests expecting "MCP enabled"
@@ -99,26 +117,23 @@ def mcp_status_text(user_id: str) -> str:
 
 
 def provider_status_text(user_id: str, provider: str) -> str:
-    """Build status text for a provider detail page."""
-    from nally.integrations import IntegrationManager
-
-    manager = IntegrationManager()
-    connected = manager.is_connected(user_id, provider)
+    """Build status text for a provider detail page — vault only."""
+    status = _get_vault_status(user_id)
+    info = status.get(provider, {})
+    connected = bool(info.get("connected"))
     label = _provider_label(provider)
 
     icon = "\U0001f7e2" if connected else "\U0001f534"
-    status = "Connected" if connected else "Not connected"
+    status_s = "Connected" if connected else "Not connected"
 
     lines = [
         f"<b>{label}</b>",
         "",
-        f"Status: {icon} {status}",
+        f"Status: {icon} {status_s}",
     ]
 
-    if connected:
-        account = manager.get_provider(provider).get_account_info(user_id)
-        if account:
-            lines.append(f"Account: {html.escape(account)}")
+    if connected and info.get("account"):
+        lines.append(f"Account: {html.escape(info['account'])}")
 
     return "\n".join(lines)
 
@@ -131,175 +146,96 @@ def provider_status_text(user_id: str, provider: str) -> str:
 async def handle_provider_connect(
     query: Any, context: Any, provider: str, user_id: str, chat_id: int | None = None
 ) -> None:
-    """Start OAuth flow for a provider.
-
-    Tries canonical OAuthManager (browser flow) first, falls back to
-    IntegrationManager (legacy device flow) for backward compat.
-    """
+    """Start browser-only OAuth flow (v2) — one link, no device code."""
     label = _provider_label(provider)
 
-    # Try canonical browser OAuth first
+    # Resolve canonical internal user_id via directory if possible (telegram -> internal UUID)
+    internal_user_id = user_id
     try:
-        from nally.oauth.callback import build_callback_url
-        from nally.oauth.manager import get_oauth_manager
+        from nally.directory import get_directory
 
-        oauth_mgr = get_oauth_manager()
-        redirect_uri = build_callback_url(provider)
-        session = await oauth_mgr.begin(user_id, provider, redirect_uri)
+        d = get_directory()
+        # This will create or return existing internal user for telegram
+        u = d.get_or_create_for_telegram(telegram_id=user_id)
+        if u and u.get("id"):
+            internal_user_id = u["id"]
+    except Exception:
+        # Fallback to raw telegram ID (vault file path will use it)
+        pass
 
-        # Browser flow: show authorization button
-        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-
-        kb = InlineKeyboardMarkup(
-            [[InlineKeyboardButton("Authorize", url=session.authorization_url)]]
-        )
-        status_msg = await query.edit_message_text(
-            f"<b>{label} OAuth</b>\n\n"
-            f"Click the button to authorize {label}.\n"
-            f"You'll be redirected back after approving. I'll check automatically...",
-            parse_mode="HTML",
-            reply_markup=kb,
-        )
-
-        # Poll for credential via TokenStore (callback will store it)
-        async def _poll_browser():
-            try:
-                # Wait up to 5 minutes for user to complete browser flow
-                import time
-
-                start = time.time()
-                timeout = 300
-                while time.time() - start < timeout:
-                    if oauth_mgr.has_credential(user_id, provider):
-                        if chat_id is not None:
-                            try:
-                                from nally.telegram.bot import _runtime
-
-                                _runtime.clear_agent(chat_id)
-                            except Exception:
-                                pass
-                        try:
-                            kb2 = build_mcp_keyboard()
-                            text2 = mcp_status_text(user_id)
-                            if status_msg is not None:
-                                await status_msg.edit_text(
-                                    text2, reply_markup=kb2, parse_mode="HTML"
-                                )
-                        except Exception:
-                            pass
-                        return
-                    await asyncio.sleep(2)
-                # Timeout
-                try:
-                    if status_msg is not None:
-                        await status_msg.edit_text(f"{label} auth timed out. Please try again.")
-                except Exception:
-                    pass
-            except Exception as exc:
-                try:
-                    if status_msg is not None:
-                        await status_msg.edit_text(f"{label} auth failed: {exc}")
-                except Exception:
-                    pass
-
-        _task = asyncio.create_task(_poll_browser())
-        try:
-            context.bot_data.setdefault("_mcp_tasks", []).append(_task)
-            _task.add_done_callback(
-                lambda t: (
-                    context.bot_data["_mcp_tasks"].remove(t)
-                    if t in context.bot_data.get("_mcp_tasks", [])
-                    else None
-                )
-            )
-        except Exception:
-            logger.debug("mcp_ui: failed to track browser OAuth task")
-        return
-    except Exception as exc:
-        # If not configured, show that directly (don't fallback to device flow)
-        if "not configured" in str(exc).lower():
-            with contextlib.suppress(Exception):
-                await query.edit_message_text(f"Could not start {label} auth: {exc}")
-            return
-        logger.debug(
-            "Browser OAuth failed for %s: %s, falling back to IntegrationManager", provider, exc
-        )
-
-    # Fallback: legacy IntegrationManager (device flow)
-    from nally.integrations import IntegrationManager
-
-    manager = IntegrationManager()
-
+    # Start v2 AuthBroker flow
     try:
-        flow_data = await manager.connect(user_id, provider)
+        from nally.auth_broker import get_broker
+
+        broker = get_broker()
+        session = await broker.start(
+            user_id=internal_user_id, provider=provider, return_surface="telegram", return_reference=str(chat_id or "")
+        )
     except Exception as exc:
+        # Provider not configured or other error — show deterministic message, no fallback to device flow
         with contextlib.suppress(Exception):
             await query.edit_message_text(f"Could not start {label} auth: {exc}")
         return
 
-    # Build connect message based on flow type
-    if "user_code" in flow_data:
-        # Device flow (GitHub, Gmail)
-        user_code = flow_data["user_code"]
-        verification_uri = flow_data.get("verification_uri", "")
-        expires_in = flow_data.get("expires_in", 900)
+    # Show single HTTPS link (no device code, no polling provider)
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
-        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("Authorize", url=session.authorization_url)]])
+    status_msg = await query.edit_message_text(
+        f"<b>{label} OAuth</b>\n\n"
+        f"Click the button to authorize {label}.\n"
+        f"You'll be redirected back after approving. I'll check automatically...",
+        parse_mode="HTML",
+        reply_markup=kb,
+    )
 
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("Open", url=verification_uri)]])
-        status_msg = await query.edit_message_text(
-            f"<b>{label} OAuth</b>\n\n"
-            f"Visit: {html.escape(verification_uri)}\n"
-            f"Enter code: <code>{html.escape(user_code)}</code>\n\n"
-            f"Code expires in {expires_in // 60} min. I'll check automatically...",
-            parse_mode="HTML",
-            reply_markup=kb,
-        )
-    elif "auth_url" in flow_data:
-        # PKCE flow (Notion)
-        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("Open", url=flow_data["auth_url"])]])
-        status_msg = await query.edit_message_text(
-            f"<b>{label} OAuth</b>\n\n"
-            f"Click the button to authorize.\n"
-            f"You'll be redirected back after approving. I'll check automatically...",
-            parse_mode="HTML",
-            reply_markup=kb,
-        )
-    else:
-        with contextlib.suppress(Exception):
-            await query.edit_message_text(f"Unexpected flow response from {label}.")
-        return
-
-    # Spawn background polling task
-    async def _poll_and_update():
+    # Wait for vault credential via DB/event notification (not provider polling)
+    async def _poll_vault():
         try:
-            connected = await manager.poll_connection(user_id, provider, flow_data)
-            if connected:
-                # Clear cached agent so next message loads MCP tools with new token
-                if chat_id is not None:
-                    try:
-                        from nally.telegram.bot import _runtime
+            import time
 
-                        _runtime.clear_agent(chat_id)
+            from nally.vault import get_vault
+
+            vault = get_vault()
+            start = time.time()
+            timeout = 300
+            while time.time() - start < timeout:
+                # Check vault directly (cross-user, no fallback)
+                cred = vault.get(internal_user_id, provider)
+                if cred and not cred.is_expired:
+                    if chat_id is not None:
+                        try:
+                            from nally.telegram.bot import _runtime
+
+                            _runtime.clear_agent(chat_id)
+                        except Exception:
+                            pass
+                        try:
+                            from nally.mcp.broker import get_broker as get_mcp_broker
+
+                            await get_mcp_broker().invalidate_cache(internal_user_id, provider)
+                        except Exception:
+                            pass
+                    try:
+                        kb2 = build_mcp_keyboard()
+                        # Note: mcp_status_text uses user_id which may be telegram raw vs internal.
+                        # Use internal for vault lookup but display same text
+                        text2 = mcp_status_text(internal_user_id) if internal_user_id != user_id else mcp_status_text(user_id)
+                        # Try both ids for display compat
+                        if text2.count("Not connected") == 3:
+                            # Fallback to original id text if internal shows empty (file fallback mismatch)
+                            text2 = mcp_status_text(user_id)
+                        if status_msg is not None:
+                            await status_msg.edit_text(text2, reply_markup=kb2, parse_mode="HTML")
                     except Exception:
                         pass
-                try:
-                    kb2 = build_mcp_keyboard()
-                    text2 = mcp_status_text(user_id)
-                    if status_msg is not None:
-                        await status_msg.edit_text(text2, reply_markup=kb2, parse_mode="HTML")
-                except Exception:
-                    pass
-            else:
-                try:
-                    if status_msg is not None:
-                        await status_msg.edit_text(
-                            f"{label} auth failed: connection not established."
-                        )
-                except Exception:
-                    pass
+                    return
+                await asyncio.sleep(2)
+            try:
+                if status_msg is not None:
+                    await status_msg.edit_text(f"{label} auth timed out. Please try again.")
+            except Exception:
+                pass
         except Exception as exc:
             try:
                 if status_msg is not None:
@@ -307,7 +243,7 @@ async def handle_provider_connect(
             except Exception:
                 pass
 
-    _task = asyncio.create_task(_poll_and_update())
+    _task = asyncio.create_task(_poll_vault())
     try:
         context.bot_data.setdefault("_mcp_tasks", []).append(_task)
         _task.add_done_callback(
@@ -318,7 +254,7 @@ async def handle_provider_connect(
             )
         )
     except Exception:
-        logger.debug("mcp_ui: failed to track background task")
+        logger.debug("mcp_ui: failed to track browser OAuth task")
 
 
 # ---------------------------------------------------------------------------
@@ -329,13 +265,40 @@ async def handle_provider_connect(
 async def handle_provider_disconnect(
     query: Any, provider: str, user_id: str, chat_id: int | None = None
 ) -> None:
-    """Disconnect a provider."""
-    from nally.integrations import IntegrationManager
-
-    manager = IntegrationManager()
-
+    """Disconnect a provider — vault only, atomic, cache invalidated."""
+    # Resolve internal user id same as connect
+    internal_user_id = user_id
     try:
-        disconnected = manager.disconnect(user_id, provider)
+        from nally.directory import get_directory
+
+        d = get_directory()
+        u = d.get_or_create_for_telegram(telegram_id=user_id)
+        if u and u.get("id"):
+            internal_user_id = u["id"]
+    except Exception:
+        pass
+    try:
+        from nally.auth_broker import get_broker
+
+        broker = get_broker()
+        disconnected = await broker.revoke(internal_user_id, provider)
+        # Also try vault directly with raw id for legacy file fallback
+        if not disconnected:
+            try:
+                from nally.vault import get_vault
+
+                vault = get_vault()
+                disconnected = vault.delete(user_id, provider) or vault.delete(internal_user_id, provider)
+                if disconnected:
+                    try:
+                        from nally.mcp.broker import get_broker as get_mcp_broker
+
+                        await get_mcp_broker().invalidate_cache(internal_user_id, provider)
+                        await get_mcp_broker().invalidate_cache(user_id, provider)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
         if disconnected:
             if chat_id is not None:
                 try:
@@ -345,7 +308,10 @@ async def handle_provider_disconnect(
                 except Exception:
                     pass
             kb = build_mcp_keyboard()
-            text = mcp_status_text(user_id)
+            # Prefer internal status text
+            text = mcp_status_text(internal_user_id)
+            if "Not connected" not in text:
+                text = mcp_status_text(user_id)
             with contextlib.suppress(Exception):
                 await query.edit_message_text(text, reply_markup=kb, parse_mode="HTML")
         else:
@@ -362,13 +328,36 @@ async def handle_provider_disconnect(
 
 
 async def handle_disconnect_all(query: Any, user_id: str, chat_id: int | None = None) -> None:
-    """Disconnect all providers."""
-    from nally.integrations import IntegrationManager
-
-    manager = IntegrationManager()
-
+    """Disconnect all providers — vault only."""
+    internal_user_id = user_id
     try:
-        count = manager.disconnect_all(user_id)
+        from nally.directory import get_directory
+
+        d = get_directory()
+        u = d.get_or_create_for_telegram(telegram_id=user_id)
+        if u and u.get("id"):
+            internal_user_id = u["id"]
+    except Exception:
+        pass
+    try:
+        from nally.auth_broker import get_broker
+
+        broker = get_broker()
+        count = 0
+        for p in ("github", "gmail", "notion"):
+            try:
+                ok = await broker.revoke(internal_user_id, p)
+                if ok:
+                    count += 1
+                else:
+                    # Try raw id fallback
+                    from nally.vault import get_vault
+
+                    vault = get_vault()
+                    if vault.delete(user_id, p):
+                        count += 1
+            except Exception:
+                continue
         if count > 0 and chat_id is not None:
             try:
                 from nally.telegram.bot import _runtime
@@ -377,7 +366,7 @@ async def handle_disconnect_all(query: Any, user_id: str, chat_id: int | None = 
             except Exception:
                 pass
         kb = build_mcp_keyboard()
-        text = mcp_status_text(user_id)
+        text = mcp_status_text(internal_user_id) if internal_user_id != user_id else mcp_status_text(user_id)
         with contextlib.suppress(Exception):
             if count > 0:
                 await query.edit_message_text(text, reply_markup=kb, parse_mode="HTML")
@@ -394,12 +383,23 @@ async def handle_disconnect_all(query: Any, user_id: str, chat_id: int | None = 
 
 
 async def handle_provider_detail(query: Any, provider: str, user_id: str) -> None:
-    """Show provider detail page."""
-    from nally.integrations import IntegrationManager
+    """Show provider detail page — vault only."""
+    internal_user_id = user_id
+    try:
+        from nally.directory import get_directory
 
-    manager = IntegrationManager()
-    connected = manager.is_connected(user_id, provider)
-    text = provider_status_text(user_id, provider)
+        d = get_directory()
+        u = d.get_or_create_for_telegram(telegram_id=user_id)
+        if u and u.get("id"):
+            internal_user_id = u["id"]
+    except Exception:
+        pass
+    status = _get_vault_status(internal_user_id)
+    if not any(v.get("connected") for v in status.values()):
+        status = _get_vault_status(user_id)
+        internal_user_id = user_id
+    connected = bool(status.get(provider, {}).get("connected"))
+    text = provider_status_text(internal_user_id, provider)
     kb = build_provider_keyboard(provider, connected)
 
     with contextlib.suppress(Exception):

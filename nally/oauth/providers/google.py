@@ -263,6 +263,27 @@ class GoogleProvider:
             )
         return True
 
+    async def identity(self, token: OAuthToken):
+        """Fetch Google identity (userinfo)."""
+        from nally.auth_broker.models import ProviderIdentity
+
+        try:
+            resp = await asyncio.to_thread(
+                requests.get,
+                _USERINFO_URL,
+                headers={"Authorization": f"Bearer {token.access_token}"},
+                timeout=10,
+            )
+            if resp.ok:
+                info = resp.json()
+                subject = str(info.get("sub") or info.get("id") or token.account or "google-user")
+                display = info.get("email") or token.account
+                return ProviderIdentity(subject=subject, display_name=display, raw=info)
+        except Exception:
+            pass
+        subj = token.account or "google-user"
+        return ProviderIdentity(subject=subj, display_name=token.account, raw={})
+
     def format_auth_headers(self, token: OAuthToken) -> dict[str, str]:
         return {"Authorization": f"Bearer {token.access_token}"}
 
