@@ -1,6 +1,6 @@
 [project]
 name = "simply-nally"
-version = "0.1.0"
+version = "1.0.0"
 description = "Simply NALLY — the smallest reliable agent we can completely understand."
 readme = "README.md"
 requires-python = ">=3.11"
