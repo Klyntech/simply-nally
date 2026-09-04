@@ -39,6 +39,7 @@ class Agent:
         self.max_iterations = max_iterations if max_iterations is not None else MAX_ITERATIONS
         self.max_tool_calls = max_tool_calls if max_tool_calls is not None else MAX_TOOL_CALLS
         self.on_tool_start = on_tool_start
+        self._telegram_user_id = telegram_user_id
 
         if conversation is not None:
             self.conversation = conversation
@@ -100,11 +101,93 @@ class Agent:
 
         return [{"role": "system", "content": memory_context}, *messages]
 
+
+    def _ensure_mcp_tools(self) -> str:
+        """Refresh MCP/fallback tools and return a short status line for the model.
+
+        Cached agents keep a stale empty registry after OAuth connect or deploys.
+        Re-registering is cheap when tools already exist; critical when they don't.
+        """
+        try:
+            from nally.config import MCP_ENABLED
+            if not MCP_ENABLED:
+                return "MCP is disabled (NALLY_MCP_ENABLED is not true)."
+        except Exception:
+            return ""
+
+        lookup = None
+        tid = getattr(self, "_telegram_user_id", None)
+        if tid:
+            try:
+                from nally.directory import get_directory
+                u = get_directory().get_or_create_for_telegram(telegram_id=str(tid))
+                if u and u.get("id"):
+                    lookup = u["id"]
+            except Exception:
+                lookup = str(tid)
+        if not lookup:
+            lookup = self._get_user_id()
+
+        mcp_count = sum(1 for n in self.registry.names() if n.startswith("mcp_") or n.startswith("mcp__"))
+        if mcp_count == 0 and lookup:
+            try:
+                from nally.tools import build_default_registry
+                # Merge freshly built MCP tools into existing registry
+                fresh = build_default_registry(
+                    user_id=lookup,
+                    mcp_user_id=lookup,
+                    load_mcp=True,
+                )
+                for name in fresh.names():
+                    if name.startswith("mcp_") or name.startswith("mcp__"):
+                        if name not in self.registry:
+                            try:
+                                self.registry.register(fresh.get(name))  # type: ignore[arg-type]
+                            except Exception:
+                                pass
+            except Exception as exc:
+                logger.warning("MCP refresh failed: %s", exc)
+            # Explicit GitHub fallback
+            try:
+                from nally.mcp.github_fallback import register_github_fallback_tools
+                register_github_fallback_tools(self.registry, lookup)
+            except Exception as exc:
+                logger.warning("GitHub fallback refresh failed: %s", exc)
+
+        # Status line for the model
+        lines = []
+        try:
+            from nally.vault import get_vault
+            vault = get_vault()
+            for p in ("github", "gmail", "notion"):
+                cred = vault.get_valid(lookup, p) if lookup else None
+                if cred:
+                    acct = (cred.provider_metadata or {}).get("account") or cred.subject or "connected"
+                    lines.append(f"{p}: connected as {acct}")
+                else:
+                    lines.append(f"{p}: not connected")
+        except Exception:
+            pass
+        tools = [n for n in self.registry.names() if n.startswith("mcp_") or n.startswith("mcp__")]
+        if tools:
+            sample = ", ".join(sorted(set(tools))[:15])
+            lines.append(f"Available MCP tools (use these exact names): {sample}")
+        else:
+            lines.append("No MCP tools loaded. If a provider shows connected, reconnect via /mcp.")
+        return "MCP status:\n" + "\n".join(lines) if lines else ""
+
     # ------------------------------------------------------------------ public
     def run(self, user_input: str) -> str:
         """Process a user message and return the final assistant response."""
         if not user_input or not user_input.strip():
             return "Please provide a message."
+
+        # Refresh MCP tools + connection context (fixes stale cached agents)
+        mcp_context = ""
+        try:
+            mcp_context = self._ensure_mcp_tools()
+        except Exception as exc:
+            logger.debug("ensure mcp tools: %s", exc)
 
         # Check for explicit memory commands first
         if self._memory_manager is not None:
@@ -119,6 +202,8 @@ class Agent:
         memory_context = ""
         if self._memory_manager is not None:
             memory_context = self._memory_manager.build_context_block(user_input)
+        if mcp_context:
+            memory_context = (memory_context + "\n\n" + mcp_context).strip() if memory_context else mcp_context
 
         total_tool_calls = 0
 

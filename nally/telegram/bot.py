@@ -260,6 +260,9 @@ async def handle_mcp(update, context) -> None:
     if not telegram_id:
         await update.message.reply_text("Cannot determine your Telegram ID.")
         return
+    # Drop cached agent so next chat turn reloads MCP tools with current vault state
+    if update.effective_chat:
+        _runtime.clear_agent(update.effective_chat.id)
 
     if not _runtime.is_linked(telegram_id):
         await update.message.reply_text(
