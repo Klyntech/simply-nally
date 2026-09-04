@@ -1,15 +1,13 @@
-"""Integrations — OAuth connection lifecycle for MCP providers.
+"""DEPRECATED — legacy OAuth integration layer.
 
-Each provider (GitHub, Gmail, Notion) implements its own OAuth flow
-behind a uniform BaseProvider interface. IntegrationManager gives
-Telegram one clean interface without knowing flow details.
+This package is kept only for a short migration grace period.
+Canonical path (v2):
 
-Usage:
-    from nally.integrations import IntegrationManager
+    AuthBroker (nally.auth_broker)  →  CredentialVault (nally.vault)
+                                    →  MCPConnectionBroker (nally.mcp.broker)
 
-    manager = IntegrationManager()
-    status = manager.status(user_id)
-    await manager.connect(user_id, "github")
+Do not add new code here. Prefer AuthBroker + Vault for all new work.
+Will be removed in a future release.
 """
 
 from .base import BaseProvider
@@ -31,8 +29,8 @@ __all__ = [
     "BaseProvider",
     "GitHubProvider",
     "GmailProvider",
-    "IntegrationManager",
     "NotionProvider",
+    "IntegrationManager",
     "TokenStoreError",
     "clear_all_user_tokens",
     "clear_token",

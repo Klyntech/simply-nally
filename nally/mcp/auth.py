@@ -1,9 +1,13 @@
-"""MCP authentication — AuthProvider abstraction + credential injection.
+"""MCP authentication — env-based AuthProvider (CLI / single-user only).
 
-Responsibility: resolve credentials for MCP servers for MCP transport.
-Decoupled from OAuth lifecycle (nally.integrations) and transport (client.py).
+For multi-user / production the canonical path is:
 
-Supported servers: github, gmail, notion. Unknown servers are rejected.
+    AuthBroker → CredentialVault → MCP adapter (_inject_user_auth)
+
+This module is still used by the CLI fallback path when
+NALLY_ALLOW_ENV_FALLBACK=true or when no user_id is present.
+
+Supported servers: github, gmail, notion.
 """
 
 from __future__ import annotations

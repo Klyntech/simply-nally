@@ -13,6 +13,40 @@ A minimalist AI agent framework implementing a ReAct (Reason + Act) loop with bu
 - Prefer explicit code over abstractions. Prefer stdlib over dependencies.
 - `BUILD → TEST → UNDERSTAND → HARDEN → SIMPLIFY → REPEAT`
 
+## Architecture (MCP + OAuth) — Clean View
+
+```
+User (CLI / Telegram)
+        │
+        ▼
+┌───────────────────────┐
+│   AuthBroker (v2)     │  Browser-only OAuth + PKCE
+│   nally/auth_broker/  │  Single login session lifecycle
+└───────────┬───────────┘
+            │ stores encrypted credential
+            ▼
+┌───────────────────────┐
+│   CredentialVault     │  Encrypted-at-rest, per-user
+│   nally/vault/        │  Raw tokens never reach agent/Telegram
+└───────────┬───────────┘
+            │
+            ▼
+┌───────────────────────┐
+│  MCPConnectionBroker  │  Per-user tool cache + invalidation
+│  nally/mcp/broker.py  │
+└───────────┬───────────┘
+            │
+            ▼
+┌───────────────────────┐
+│  MCP Adapter + Client │  Discovers tools, injects auth
+│  nally/mcp/adapter.py │  ephemerally at call time only
+│  nally/mcp/client.py  │
+└───────────────────────┘
+```
+
+**Canonical path**: AuthBroker → Vault → MCPConnectionBroker → Adapter  
+**Legacy** (deprecated, migration only): `nally/integrations/`, `github_oauth.py`, `notion_oauth.py`
+
 ## What's New in v2 (MCP Login & Credential Isolation)
 
 - **Browser-only OAuth** — One link, choose account in browser, done. No device codes, no polling, no `enter code` screens.
@@ -134,8 +168,8 @@ simply-nally/
     └── test_*.py
 ```
 
-> Legacy `nally/integrations/`, `github_oauth.py`, `notion_oauth.py`, and `mcp/auth.py` device-flow code remain for
-> migration grace period but are not used when `NALLY_AUTH_V2=true` (default). They will be removed.
+> **Legacy (deprecated)**: `nally/integrations/`, `github_oauth.py`, `notion_oauth.py` remain only for a short migration
+> grace period. The canonical path is AuthBroker → Vault → MCPConnectionBroker. They will be removed.
 
 ## Built-in Tools
 

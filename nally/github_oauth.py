@@ -1,10 +1,11 @@
-"""GitHub OAuth for MCP — device flow (primary) + PKCE (experimental).
+"""DEPRECATED — legacy GitHub OAuth (device flow + early PKCE).
 
-This module provides GitHub OAuth flows for CLI usage. The Telegram bot
-now uses nally.integrations.github.GitHubProvider instead.
+Canonical path is now browser-only via AuthBroker + Vault:
 
-Device flow: github_request_device_code() -> user enters code -> github_poll_token()
-PKCE flow (experimental): build_auth_url() -> browser -> callback -> _exchange_code()
+    python main.py mcp connect github
+
+This module remains only for a short migration period and some
+test compatibility. Do not use in new code.
 """
 
 from __future__ import annotations

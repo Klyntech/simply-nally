@@ -1,18 +1,11 @@
-"""Notion OAuth for MCP — PKCE flow with dynamic client registration.
+"""DEPRECATED — legacy Notion OAuth (PKCE + dynamic registration).
 
-Notion MCP only supports OAuth 2.0 + PKCE (no device flow, no PAT for remote).
-This module handles the full flow:
+Canonical path is now browser-only via AuthBroker + Vault:
 
-    discover_oauth_metadata() -> register_client() -> build_auth_url()
-    -> browser -> callback -> exchange_code() -> cache token
+    python main.py mcp connect notion
 
-Discovery follows RFC 9470 (Protected Resource Metadata) -> RFC 8414
-(Authorization Server Metadata). Client registration uses RFC 7591.
-
-Token cache: ``~/.config/simply-nally/notion_oauth_token.json``
-
-Access tokens last ~8 hours. Refresh tokens rotate on every use and expire
-after 180 days max or 30 days idle.
+This module remains only for a short migration period.
+Do not use in new code.
 """
 
 from __future__ import annotations
