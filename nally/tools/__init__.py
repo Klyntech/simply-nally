@@ -115,6 +115,14 @@ def build_default_registry(
                                 logger.info("Notion fallback added %d tools", nb)
                         except Exception as exc:
                             logger.warning("Notion fallback failed: %s", exc)
+                        try:
+                            from ..mcp.gmail_fallback import register_gmail_fallback_tools
+
+                            gb = register_gmail_fallback_tools(registry, lookup)
+                            if gb:
+                                logger.info("Gmail fallback added %d tools", gb)
+                        except Exception as exc:
+                            logger.warning("Gmail fallback failed: %s", exc)
         except Exception as exc:
             logger.warning("MCP setup failed: %s: %s", type(exc).__name__, exc)
     return registry
