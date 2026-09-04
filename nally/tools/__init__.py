@@ -94,9 +94,19 @@ def build_default_registry(
                         logger.info("MCP tools loaded: %d (user=%s)", mcp_count, (lookup or "cli")[:12])
                         if mcp_count == 0 and lookup:
                             logger.warning(
-                                "0 MCP tools for user %s — check vault credential and NALLY_MCP_ENABLED",
+                                "0 MCP tools for user %s — trying GitHub REST fallback",
                                 lookup[:12],
                             )
+                        # Always ensure GitHub REST fallback when credential exists
+                        # (remote MCP discovery often fails on hosted deploys)
+                        try:
+                            from ..mcp.github_fallback import register_github_fallback_tools
+
+                            fb = register_github_fallback_tools(registry, lookup)
+                            if fb:
+                                logger.info("GitHub fallback added %d tools", fb)
+                        except Exception as exc:
+                            logger.warning("GitHub fallback failed: %s", exc)
         except Exception as exc:
             logger.warning("MCP setup failed: %s: %s", type(exc).__name__, exc)
     return registry
