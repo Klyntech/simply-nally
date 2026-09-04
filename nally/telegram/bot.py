@@ -627,6 +627,8 @@ def run_bot(token: str | None = None, *, drop_pending_updates: bool = False) -> 
                 )
 
         async def startup() -> None:
+            # PTB v20+ requires initialize() before start()
+            await ptb_app.initialize()
             await ptb_app.start()
             await ptb_app.bot.set_webhook(
                 f"{base_url}/{tok}",
@@ -637,6 +639,7 @@ def run_bot(token: str | None = None, *, drop_pending_updates: bool = False) -> 
 
         async def shutdown() -> None:
             await ptb_app.stop()
+            await ptb_app.shutdown()
 
         # Starlette 1.x removed on_startup/on_shutdown — use lifespan
         try:
