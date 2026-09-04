@@ -85,7 +85,7 @@ class MCPConnectionBroker:
         total = await load_mcp_tools(registry, config=config, timeout=timeout, user_id=user_id)
         if cache and user_id:
             # Snapshot registry tools into cache
-            tools = {name: tool for name, tool in registry._tools.items() if name.startswith("mcp__")}
+            tools = {name: tool for name, tool in registry._tools.items() if name.startswith("mcp_")}
             # Determine connected providers from vault
             try:
                 providers = set(self._vault.list_providers(user_id))
@@ -123,7 +123,7 @@ class MCPConnectionBroker:
         if entry is None:
             return
         # Remove tools for this provider and update connected set
-        to_remove = [k for k in entry.tools.keys() if f"mcp__{provider}__" in k]
+        to_remove = [k for k in entry.tools.keys() if k.startswith(f"mcp_{provider}_")]
         for k in to_remove:
             entry.tools.pop(k, None)
         entry.connected_providers.discard(provider)
@@ -188,13 +188,21 @@ class MCPConnectionBroker:
 
         This is the runtime path for agent tool execution.
         """
-        # Parse server and orig name from namespaced tool
-        if not tool_name.startswith("mcp__"):
+        # Parse server and orig name from namespaced tool: mcp_{server}_{orig}
+        # Known servers: github, gmail, notion
+        if not tool_name.startswith("mcp_"):
             raise ValueError(f"Not an MCP tool: {tool_name}")
-        parts = tool_name.split("__", 2)
-        if len(parts) != 3:
+        rest = tool_name[len("mcp_"):]
+        server_name = None
+        orig_name = None
+        for s in ("github", "gmail", "notion"):
+            prefix = s + "_"
+            if rest.startswith(prefix):
+                server_name = s
+                orig_name = rest[len(prefix):]
+                break
+        if not server_name or not orig_name:
             raise ValueError(f"Invalid MCP tool name: {tool_name}")
-        _, server_name, orig_name = parts
         from nally.mcp.adapter import _call_tool_async
 
         # Use vault-based auth via adapter's _call_tool_async which now checks vault

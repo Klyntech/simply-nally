@@ -352,7 +352,7 @@ class MCPTool(Tool):
         mcp_user_id: str | None = None,
     ) -> None:
         params = _mcp_schema_to_params(input_schema)
-        namespaced = f"mcp__{server_name}__{orig_name}"
+        namespaced = f"mcp_{server_name}_{orig_name}"
         super().__init__(
             name=namespaced,
             description=description or f"MCP tool {orig_name} from {server_name}",
@@ -408,7 +408,7 @@ async def _load_one_server(
             while True:
                 result = await asyncio.wait_for(client.list_tools(cursor=cursor), timeout=timeout)
                 for tool in result.tools:
-                    if tool.name in deny or f"mcp__{server_name}__{tool.name}" in deny:
+                    if tool.name in deny or f"mcp_{server_name}_{tool.name}" in deny:
                         continue
                     try:
                         mcp_tool = MCPTool(

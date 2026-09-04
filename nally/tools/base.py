@@ -288,17 +288,24 @@ class ToolRegistry:
         machine-readable status (OK, AUTH_REQUIRED, ERROR).
         """
         tool = self._tools.get(name)
-        # Alias: allow short name without mcp prefix (model sometimes drops it)
-        if tool is None and "__" not in name:
-            candidates = [n for n in self._tools if n.endswith(f"__{name}")]
-            if len(candidates) == 1:
-                tool = self._tools.get(candidates[0])
-                name = candidates[0]
-            elif len(candidates) > 1:
-                github = [c for c in candidates if "github" in c]
-                if github:
-                    tool = self._tools.get(github[0])
-                    name = github[0]
+        # Tolerant lookup: models often mangle MCP names (drop underscores, drop mcp_ prefix)
+        if tool is None:
+            def _norm(s: str) -> str:
+                return s.replace("_", "").replace("-", "").lower()
+
+            target = _norm(name)
+            matches = [n for n in self._tools if _norm(n) == target]
+            # Also: short name without mcp_ prefix → mcp_{server}_{name}
+            if not matches and not name.startswith("mcp_"):
+                matches = [n for n in self._tools if n.endswith(f"_{name}") or n.endswith(f"__{name}")]
+            if len(matches) == 1:
+                name = matches[0]
+                tool = self._tools.get(name)
+            elif len(matches) > 1:
+                # Prefer github if ambiguous
+                preferred = [m for m in matches if "github" in m] or matches
+                name = preferred[0]
+                tool = self._tools.get(name)
         if tool is None:
             return f"Error: unknown tool '{name}'", ToolResult.error(
                 f"unknown tool '{name}'", tool_name=name
