@@ -126,7 +126,9 @@ def provider_status_text(user_id: str, provider: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-async def handle_provider_connect(query: Any, context: Any, provider: str, user_id: str) -> None:
+async def handle_provider_connect(
+    query: Any, context: Any, provider: str, user_id: str, chat_id: int | None = None
+) -> None:
     """Start OAuth flow for a provider."""
     from nally.integrations import IntegrationManager
 
@@ -180,6 +182,14 @@ async def handle_provider_connect(query: Any, context: Any, provider: str, user_
         try:
             connected = await manager.poll_connection(user_id, provider, flow_data)
             if connected:
+                # Clear cached agent so next message loads MCP tools with new token
+                if chat_id is not None:
+                    try:
+                        from nally.telegram.bot import _runtime
+
+                        _runtime.clear_agent(chat_id)
+                    except Exception:
+                        pass
                 try:
                     kb2 = build_mcp_keyboard()
                     text2 = mcp_status_text(user_id)
@@ -221,7 +231,9 @@ async def handle_provider_connect(query: Any, context: Any, provider: str, user_
 # ---------------------------------------------------------------------------
 
 
-async def handle_provider_disconnect(query: Any, provider: str, user_id: str) -> None:
+async def handle_provider_disconnect(
+    query: Any, provider: str, user_id: str, chat_id: int | None = None
+) -> None:
     """Disconnect a provider."""
     from nally.integrations import IntegrationManager
 
@@ -230,6 +242,13 @@ async def handle_provider_disconnect(query: Any, provider: str, user_id: str) ->
     try:
         disconnected = manager.disconnect(user_id, provider)
         if disconnected:
+            if chat_id is not None:
+                try:
+                    from nally.telegram.bot import _runtime
+
+                    _runtime.clear_agent(chat_id)
+                except Exception:
+                    pass
             kb = build_mcp_keyboard()
             text = mcp_status_text(user_id)
             with contextlib.suppress(Exception):
@@ -247,7 +266,7 @@ async def handle_provider_disconnect(query: Any, provider: str, user_id: str) ->
 # ---------------------------------------------------------------------------
 
 
-async def handle_disconnect_all(query: Any, user_id: str) -> None:
+async def handle_disconnect_all(query: Any, user_id: str, chat_id: int | None = None) -> None:
     """Disconnect all providers."""
     from nally.integrations import IntegrationManager
 
@@ -255,6 +274,13 @@ async def handle_disconnect_all(query: Any, user_id: str) -> None:
 
     try:
         count = manager.disconnect_all(user_id)
+        if count > 0 and chat_id is not None:
+            try:
+                from nally.telegram.bot import _runtime
+
+                _runtime.clear_agent(chat_id)
+            except Exception:
+                pass
         kb = build_mcp_keyboard()
         text = mcp_status_text(user_id)
         with contextlib.suppress(Exception):

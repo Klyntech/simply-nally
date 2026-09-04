@@ -289,16 +289,19 @@ async def handle_callback(update, context) -> None:
     if data == "mcp_back":
         await handle_mcp_overview(query, user_id)
     elif data == "mcp_disconnect_all":
-        await handle_disconnect_all(query, user_id)
+        chat_id = query.message.chat_id if query.message else None
+        await handle_disconnect_all(query, user_id, chat_id=chat_id)
     elif data.startswith("mcp_detail_"):
         provider = data[len("mcp_detail_") :]
         await handle_provider_detail(query, provider, user_id)
     elif data.startswith("mcp_connect_"):
         provider = data[len("mcp_connect_") :]
-        await handle_provider_connect(query, context, provider, user_id)
+        chat_id = query.message.chat_id if query.message else None
+        await handle_provider_connect(query, context, provider, user_id, chat_id=chat_id)
     elif data.startswith("mcp_disconnect_"):
         provider = data[len("mcp_disconnect_") :]
-        await handle_provider_disconnect(query, provider, user_id)
+        chat_id = query.message.chat_id if query.message else None
+        await handle_provider_disconnect(query, provider, user_id, chat_id=chat_id)
 
 
 async def handle_message(update, context) -> None:
