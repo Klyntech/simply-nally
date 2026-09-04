@@ -41,15 +41,31 @@ def _token_for(user_id: str | None) -> str | None:
     return None
 
 
+def _headers(token: str) -> dict[str, str]:
+    return {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+
+
 def _gh_get(token: str, path: str, params: dict | None = None) -> Any:
     r = requests.get(
         f"{_API}{path}",
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Accept": "application/vnd.github+json",
-            "X-GitHub-Api-Version": "2022-11-28",
-        },
+        headers=_headers(token),
         params=params or {},
+        timeout=30,
+    )
+    if r.status_code >= 400:
+        return f"Error: GitHub API {r.status_code}: {r.text[:500]}"
+    return r.json()
+
+
+def _gh_post(token: str, path: str, body: dict) -> Any:
+    r = requests.post(
+        f"{_API}{path}",
+        headers=_headers(token),
+        json=body,
         timeout=30,
     )
     if r.status_code >= 400:
@@ -156,6 +172,61 @@ class _GitHubSearchRepos(Tool):
         return f"Search results ({total} total, showing {len(lines)}):\n" + "\n".join(lines)
 
 
+
+class _GitHubCreateRepo(Tool):
+    def __init__(self, user_id: str | None, name: str = "mcp_github_create_repository") -> None:
+        super().__init__(
+            name=name,
+            description="Create a new GitHub repository under the authenticated user.",
+            parameters={
+                "name": {
+                    "type": "string",
+                    "description": "Repository name (e.g. TESTNALLY)",
+                    "required": True,
+                },
+                "description": {
+                    "type": "string",
+                    "description": "Optional short description",
+                    "required": False,
+                },
+                "private": {
+                    "type": "boolean",
+                    "description": "If true, create a private repo (default false = public)",
+                    "required": False,
+                },
+                "auto_init": {
+                    "type": "boolean",
+                    "description": "If true, initialize with a README (default true)",
+                    "required": False,
+                },
+            },
+        )
+        self.user_id = user_id
+
+    def execute(self, **kwargs: Any) -> str:
+        token = _token_for(self.user_id)
+        if not token:
+            return "Error: AUTH_REQUIRED: No GitHub credential. Connect via /mcp → Connect GitHub."
+        name = (kwargs.get("name") or "").strip()
+        if not name:
+            return "Error: name is required"
+        body = {
+            "name": name,
+            "description": kwargs.get("description") or "",
+            "private": bool(kwargs.get("private", False)),
+            "auto_init": bool(kwargs.get("auto_init", True)),
+        }
+        data = _gh_post(token, "/user/repos", body)
+        if isinstance(data, str):
+            return data
+        return (
+            f"Created repository {data.get('full_name')}\n"
+            f"URL: {data.get('html_url')}\n"
+            f"Clone: {data.get('clone_url')}\n"
+            f"Private: {data.get('private')}"
+        )
+
+
 def register_github_fallback_tools(registry: ToolRegistry, user_id: str | None) -> int:
     """Register static GitHub tools + aliases for old mcp__ naming.
 
@@ -170,10 +241,14 @@ def register_github_fallback_tools(registry: ToolRegistry, user_id: str | None) 
     tools = [
         _GitHubListRepos(user_id, "mcp_github_list_repos"),
         _GitHubSearchRepos(user_id, "mcp_github_search_repositories"),
+        _GitHubCreateRepo(user_id, "mcp_github_create_repository"),
         # Aliases for models that still emit the old double-underscore names
         _GitHubListRepos(user_id, "mcp__github__list_repos"),
         _GitHubSearchRepos(user_id, "mcp__github__search_repositories"),
         _GitHubListRepos(user_id, "mcp__github__list_repositories"),
+        _GitHubCreateRepo(user_id, "mcp__github__create_repository"),
+        _GitHubCreateRepo(user_id, "mcp_github_create_repo"),
+        _GitHubCreateRepo(user_id, "mcp__github__create_repo"),
     ]
     n = 0
     for t in tools:
