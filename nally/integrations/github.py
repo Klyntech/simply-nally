@@ -54,7 +54,7 @@ class GitHubProvider(BaseProvider):
         csec = os.getenv("GITHUB_CLIENT_SECRET", "").strip()
         if not cid or not csec:
             raise RuntimeError(
-                "GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET not set. "
+                "GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET not configured. "
                 "Register an OAuth App at https://github.com/settings/developers"
             )
 

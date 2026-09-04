@@ -1,8 +1,11 @@
-"""Notion integration — PKCE OAuth with callback server.
+"""Notion integration — PKCE OAuth with shared callback registry.
 
 Notion MCP requires authorization-code + PKCE flow.
 This provider manages the full lifecycle: discovery, registration,
 auth URL, callback, and token exchange.
+
+On Render/webhook mode, the OAuth callback is received by the Starlette
+route at /notion/callback and stored in a shared registry.
 """
 
 from __future__ import annotations
@@ -10,9 +13,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import threading
 import time
-from http.server import HTTPServer
 from typing import Any
 
 import requests
@@ -25,11 +26,10 @@ logger = logging.getLogger(__name__)
 
 # Notion MCP endpoints
 NOTION_MCP_URL = os.getenv("NOTION_MCP_URL", "https://mcp.notion.com/mcp").strip()
-CALLBACK_PORT = int(os.getenv("NOTION_CALLBACK_PORT", "8080"))
 
 
 class NotionProvider(BaseProvider):
-    """Notion OAuth via PKCE flow with callback server."""
+    """Notion OAuth via PKCE flow with shared callback registry."""
 
     PROVIDER_NAME = "notion"
 
@@ -43,14 +43,11 @@ class NotionProvider(BaseProvider):
     async def connect(self, user_id: str) -> dict[str, Any]:
         """Start Notion PKCE flow. Returns auth_url + flow state."""
         from nally.notion_oauth import (
-            _REGISTRATION_ENDPOINT,
-            _CallbackHandler,
             _get_redirect_uri,
             _pkce_challenge,
             _state,
             build_auth_url,
             discover_oauth_metadata,
-            register_client,
         )
 
         # Discover endpoints
@@ -62,6 +59,8 @@ class NotionProvider(BaseProvider):
         client_secret = os.getenv("NOTION_CLIENT_SECRET", "").strip()
 
         if not client_id:
+            from nally.notion_oauth import _REGISTRATION_ENDPOINT, register_client
+
             if not _REGISTRATION_ENDPOINT:
                 raise RuntimeError(
                     "NOTION_CLIENT_ID not set and dynamic registration not available. "
@@ -82,17 +81,7 @@ class NotionProvider(BaseProvider):
             state=st,
         )
 
-        # Reset callback state
-        _CallbackHandler.code = None
-        _CallbackHandler.state = None
-        _CallbackHandler.error = None
-
-        # Start callback server in background thread
-        server = HTTPServer(("0.0.0.0", CALLBACK_PORT), _CallbackHandler)
-        server_thread = threading.Thread(target=server.serve_forever, daemon=True)
-        server_thread.start()
-
-        logger.info("Notion OAuth: callback server started on port %d", CALLBACK_PORT)
+        logger.info("Notion OAuth: callback will be received at %s", redirect_uri)
         return {
             "auth_url": auth_url,
             "verifier": verifier,
@@ -100,79 +89,69 @@ class NotionProvider(BaseProvider):
             "client_id": client_id,
             "client_secret": client_secret,
             "redirect_uri": redirect_uri,
-            "_server": server,  # internal, for shutdown
         }
 
     async def poll_connection(self, user_id: str, flow_data: dict[str, Any]) -> bool:
-        """Wait for Notion callback to receive auth code."""
-        from nally.notion_oauth import _CallbackHandler, _exchange_code
+        """Wait for Notion callback to receive auth code via shared registry."""
+        from nally.notion_oauth import _callback_registry, _exchange_code
 
-        server = flow_data.get("_server")
+        state = flow_data.get("state")
         timeout = 300  # 5 min
 
+        start = time.time()
+        while time.time() - start < timeout:
+            entry = _callback_registry.get(state) if state else None
+            if entry is not None:
+                break
+            await asyncio.sleep(2)
+
+        entry = _callback_registry.pop(state, None) if state else None
+        if entry is None:
+            raise RuntimeError("Notion OAuth timed out -- no code received.")
+
+        code = entry.get("code")
+        error = entry.get("error")
+
+        if error:
+            raise RuntimeError(f"Notion OAuth denied: {error}")
+        if not code:
+            raise RuntimeError("Notion OAuth: no code received from callback.")
+
+        # Exchange code for tokens
+        tdata = _exchange_code(
+            code=code,
+            code_verifier=flow_data["verifier"],
+            client_id=flow_data["client_id"],
+            redirect_uri=flow_data["redirect_uri"],
+            client_secret=flow_data.get("client_secret"),
+        )
+
+        # Store token per-user
+        expires_at = time.time() + tdata.get("expires_in", 28800)
+        token_data: dict[str, Any] = {
+            "access_token": tdata["access_token"],
+            "expires_at": expires_at,
+        }
+        if "refresh_token" in tdata:
+            token_data["refresh_token"] = tdata["refresh_token"]
+        if "workspace_id" in tdata:
+            token_data["workspace_id"] = tdata["workspace_id"]
+
+        # Fetch workspace info for display
         try:
-            start = time.time()
-            while time.time() - start < timeout:
-                if _CallbackHandler.code is not None or _CallbackHandler.error is not None:
-                    break
-                await asyncio.sleep(2)
+            token_data["account"] = await self._fetch_workspace_name(tdata["access_token"])
+        except Exception:
+            token_data["account"] = "Notion workspace"
 
-            code = _CallbackHandler.code
-            error = _CallbackHandler.error
-            received_state = _CallbackHandler.state
+        try:
+            token_store.write_token(user_id, "notion", token_data)
+        except TokenStoreError as exc:
+            raise RuntimeError(
+                f"Notion OAuth succeeded but NALLY could not save the credential: {exc}"
+            ) from exc
 
-            if error:
-                raise RuntimeError(f"Notion OAuth denied: {error}")
-            if not code:
-                raise RuntimeError("Notion OAuth timed out -- no code received.")
-            if received_state != flow_data.get("state"):
-                raise RuntimeError("Notion OAuth: state mismatch (possible CSRF).")
-
-            # Exchange code for tokens
-            tdata = _exchange_code(
-                code=code,
-                code_verifier=flow_data["verifier"],
-                client_id=flow_data["client_id"],
-                redirect_uri=flow_data["redirect_uri"],
-                client_secret=flow_data.get("client_secret"),
-            )
-
-            # Store token per-user
-            expires_at = time.time() + tdata.get("expires_in", 28800)
-            token_data: dict[str, Any] = {
-                "access_token": tdata["access_token"],
-                "expires_at": expires_at,
-            }
-            if "refresh_token" in tdata:
-                token_data["refresh_token"] = tdata["refresh_token"]
-            if "workspace_id" in tdata:
-                token_data["workspace_id"] = tdata["workspace_id"]
-
-            # Fetch workspace info for display
-            try:
-                token_data["account"] = await self._fetch_workspace_name(tdata["access_token"])
-            except Exception:
-                token_data["account"] = "Notion workspace"
-
-            try:
-                token_store.write_token(user_id, "notion", token_data)
-            except TokenStoreError as exc:
-                raise RuntimeError(
-                    f"Notion OAuth succeeded but NALLY could not save the credential: {exc}"
-                ) from exc
-
-            logger.info("Notion token cached for user %s", user_id)
-
-            # Reset callback state for next flow
-            _CallbackHandler.code = None
-            _CallbackHandler.state = None
-            _CallbackHandler.error = None
-
-            return True
-
-        finally:
-            if server:
-                server.shutdown()
+        logger.info("Notion token cached for user %s", user_id)
+        return True
 
     async def _fetch_workspace_name(self, token: str) -> str:
         """Fetch Notion workspace name for display."""

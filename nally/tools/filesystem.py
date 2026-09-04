@@ -44,8 +44,7 @@ def _resolve_within_workspace(path: str, workspace: Path) -> Path:
         resolved.relative_to(ws_resolved)
     except ValueError:
         raise _WorkspaceError(
-            f"path escapes workspace: {path!r} resolves to {resolved}, "
-            f"workspace is {ws_resolved}"
+            f"path escapes workspace: {path!r} resolves to {resolved}, workspace is {ws_resolved}"
         ) from None
     return resolved
 

@@ -18,9 +18,27 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# ToolStatus — machine-readable execution status
+# ---------------------------------------------------------------------------
+
+
+class ToolStatus(StrEnum):
+    """Machine-readable tool execution status.
+
+    AUTH_REQUIRED is typed, not string-parsed, so Telegram/UI can
+    switch on it to show a Connect button instead of parsing error strings.
+    """
+
+    OK = "ok"
+    AUTH_REQUIRED = "auth_required"
+    ERROR = "error"
 
 
 # ---------------------------------------------------------------------------
@@ -32,12 +50,72 @@ class ToolResult:
 
     Replaces the old (text, bool) tuple where success was detected by
     string-prefix parsing.
+
+    New fields:
+        status: Machine-readable status (OK, AUTH_REQUIRED, ERROR)
+        structured_content: Optional structured data (preserved from MCP)
+        output: Text content (for backward compat, same as content)
+        success: Derived from status (for backward compat)
     """
 
     output: str
-    success: bool
+    success: bool = True
     tool_name: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
+    status: ToolStatus = ToolStatus.OK
+    structured_content: dict[str, Any] | None = None
+
+    def __post_init__(self) -> None:
+        # Keep success/status consistent
+        if self.status == ToolStatus.OK and not self.success:
+            # If caller set success=False but status still OK, fix status
+            self.status = ToolStatus.ERROR
+        elif self.status != ToolStatus.OK and self.success:
+            # If status is error/auth but success True, fix success
+            self.success = False
+
+    @classmethod
+    def auth_required(
+        cls,
+        provider: str,
+        tool_name: str = "",
+        message: str | None = None,
+    ) -> ToolResult:
+        """Create an AUTH_REQUIRED result for a provider."""
+        msg = message or f"Authentication required for {provider}. Please connect via /mcp."
+        return cls(
+            output=f"Error: AUTH_REQUIRED: {msg}",
+            success=False,
+            tool_name=tool_name,
+            status=ToolStatus.AUTH_REQUIRED,
+            metadata={"provider": provider},
+        )
+
+    @classmethod
+    def error(cls, message: str, tool_name: str = "") -> ToolResult:
+        return cls(
+            output=message if message.startswith("Error:") else f"Error: {message}",
+            success=False,
+            tool_name=tool_name,
+            status=ToolStatus.ERROR,
+        )
+
+    @classmethod
+    def ok(
+        cls,
+        output: str,
+        tool_name: str = "",
+        structured_content: dict[str, Any] | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> ToolResult:
+        return cls(
+            output=output,
+            success=True,
+            tool_name=tool_name,
+            metadata=metadata or {},
+            status=ToolStatus.OK,
+            structured_content=structured_content,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -98,8 +176,14 @@ class Tool:
         return True, ""
 
     # --- execution ---------------------------------------------------------
-    def execute(self, **kwargs: Any) -> str:
-        """Override in subclasses. Must return a string."""
+    def execute(self, **kwargs: Any) -> str | ToolResult:
+        """Override in subclasses. Must return a string or ToolResult.
+
+        New typed returns:
+            return ToolResult.auth_required(provider="github")
+            return ToolResult.ok(output="...")
+        Legacy string returns remain supported.
+        """
         raise NotImplementedError
 
     # --- OpenAI schema -----------------------------------------------------
@@ -144,8 +228,7 @@ def _check_type(value: Any, expected: str) -> bool:
     """
     if expected not in _VALID_TYPES:
         raise ValueError(
-            f"Unknown parameter type '{expected}'. "
-            f"Valid types: {sorted(_VALID_TYPES)}"
+            f"Unknown parameter type '{expected}'. Valid types: {sorted(_VALID_TYPES)}"
         )
     mapping = {
         "string": str,
@@ -191,7 +274,18 @@ class ToolRegistry:
     def execute(self, name: str, arguments: dict[str, Any]) -> tuple[str, bool]:
         """Validate and execute a tool.
 
-        Returns (result_text, success).
+        Returns (result_text, success). For typed results, use execute_result().
+        """
+        result, tool_result = self.execute_result(name, arguments)
+        return result, tool_result.success if tool_result else not result.lstrip().startswith(
+            "Error:"
+        )
+
+    def execute_result(self, name: str, arguments: dict[str, Any]) -> tuple[str, ToolResult]:
+        """Validate and execute a tool, returning typed ToolResult.
+
+        Returns (result_text, ToolResult). The ToolResult contains
+        machine-readable status (OK, AUTH_REQUIRED, ERROR).
         """
         tool = self._tools.get(name)
         # Alias: allow short name without mcp prefix (model sometimes drops it)
@@ -206,16 +300,30 @@ class ToolRegistry:
                     tool = self._tools.get(github[0])
                     name = github[0]
         if tool is None:
-            return f"Error: unknown tool '{name}'", False
+            return f"Error: unknown tool '{name}'", ToolResult.error(
+                f"unknown tool '{name}'", tool_name=name
+            )
 
         # Validate before execution
         ok, err = tool.validate(arguments)
         if not ok:
-            return f"Error: invalid arguments for '{name}': {err}", False
+            msg = f"Error: invalid arguments for '{name}': {err}"
+            return msg, ToolResult.error(msg, tool_name=name)
 
         try:
-            result = tool.execute(**arguments)
-            # Ensure string
+            raw = tool.execute(**arguments)
+            # Handle typed ToolResult return
+            if isinstance(raw, ToolResult):
+                output = raw.output
+                # Truncate if needed
+                if len(output) > self.max_output:
+                    output = (
+                        output[: self.max_output] + f"\n... [truncated, {len(output)} chars total]"
+                    )
+                    raw.output = output
+                return output, raw
+            # Legacy string return
+            result = raw
             if not isinstance(result, str):
                 try:
                     result = json.dumps(result, ensure_ascii=False, indent=2)
@@ -223,16 +331,32 @@ class ToolRegistry:
                     result = str(result)
         except Exception as exc:
             logger.exception("Tool '%s' raised %s: %s", name, type(exc).__name__, exc)
-            return f"Error executing '{name}': {type(exc).__name__}: {exc}", False
+            msg = f"Error executing '{name}': {type(exc).__name__}: {exc}"
+            return msg, ToolResult.error(msg, tool_name=name)
 
         # Truncate
         if len(result) > self.max_output:
             result = result[: self.max_output] + f"\n... [truncated, {len(result)} chars total]"
 
-        # Structured success — no more string-prefix parsing.
-        # Errors from tools always start with "Error:" by convention.
-        success = not result.lstrip().startswith("Error:")
-        return result, success
+        # Determine typed status from string prefix (legacy compat)
+        # "Error: AUTH_REQUIRED" → ToolStatus.AUTH_REQUIRED
+        stripped = result.lstrip()
+        if stripped.startswith("Error: AUTH_REQUIRED") or "AUTH_REQUIRED" in stripped[:100]:
+            # Try to extract provider from metadata if possible
+            provider = "unknown"
+            # Heuristic: look for provider name in message
+            for p in ("github", "gmail", "notion"):
+                if p in stripped.lower():
+                    provider = p
+                    break
+            tr = ToolResult.auth_required(provider=provider, tool_name=name, message=result)
+            # Preserve original output
+            tr.output = result
+            return result, tr
+        elif stripped.startswith("Error:"):
+            return result, ToolResult.error(result, tool_name=name)
+        else:
+            return result, ToolResult.ok(result, tool_name=name)
 
     def __len__(self) -> int:
         return len(self._tools)

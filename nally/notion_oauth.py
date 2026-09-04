@@ -311,10 +311,15 @@ def _exchange_code(
 
 
 # ---------------------------------------------------------------------------
-# Callback server
+# Callback server (CLI: standalone HTTPServer / Render: Starlette route)
 # ---------------------------------------------------------------------------
+
+# Shared registry for Starlette callback — keyed by state -> {code, error}
+_callback_registry: dict[str, dict[str, str | None]] = {}
+
+
 class _CallbackHandler(BaseHTTPRequestHandler):
-    """Handles OAuth redirect callback."""
+    """Handles OAuth redirect callback (CLI mode only)."""
 
     code: str | None = None
     state: str | None = None
@@ -327,6 +332,13 @@ class _CallbackHandler(BaseHTTPRequestHandler):
             _CallbackHandler.code = qs.get("code", [None])[0]
             _CallbackHandler.state = qs.get("state", [None])[0]
             _CallbackHandler.error = qs.get("error", [None])[0]
+            # Also write to shared registry (for Starlette mode)
+            st = _CallbackHandler.state
+            if st:
+                _callback_registry[st] = {
+                    "code": _CallbackHandler.code,
+                    "error": _CallbackHandler.error,
+                }
             self.send_response(200)
             self.send_header("Content-Type", "text/html")
             self.end_headers()
@@ -340,6 +352,28 @@ class _CallbackHandler(BaseHTTPRequestHandler):
 
     def log_message(self, format: str, *args: Any) -> None:
         pass
+
+
+async def notion_callback_route(request: Any) -> Any:
+    """Starlette route handler for /notion/callback.
+
+    Stores the OAuth code/error in _callback_registry keyed by state,
+    so notion.py's poll_connection() can pick it up.
+    """
+    from starlette.responses import HTMLResponse
+
+    qs = urllib.parse.parse_qs(request.url.query)
+    code = qs.get("code", [None])[0]
+    state = qs.get("state", [None])[0]
+    error = qs.get("error", [None])[0]
+
+    if state:
+        _callback_registry[state] = {"code": code, "error": error}
+        logger.info("Notion OAuth callback received (state=%s)", state[:8])
+
+    return HTMLResponse(
+        "<html><body><h1>Notion OAuth authorized!</h1><p>You can close this tab.</p></body></html>"
+    )
 
 
 def _get_redirect_uri() -> str:

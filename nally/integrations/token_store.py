@@ -94,9 +94,7 @@ def write_token(user_id: str, provider: str, data: dict[str, Any]) -> None:
         with contextlib.suppress(Exception):
             os.chmod(p, 0o600)
     except OSError as exc:
-        raise TokenStoreError(
-            f"Cannot write token for {user_id}/{provider}: {exc}"
-        ) from exc
+        raise TokenStoreError(f"Cannot write token for {user_id}/{provider}: {exc}") from exc
     except Exception as exc:
         raise TokenStoreError(
             f"Unexpected error writing token {user_id}/{provider}: {exc}"

@@ -77,9 +77,7 @@ class Conversation:
     def clear(self) -> None:
         """Reset to just the system prompt and clear persisted history."""
         system_msg = (
-            self.messages[0]
-            if self.messages and self.messages[0].get("role") == "system"
-            else None
+            self.messages[0] if self.messages and self.messages[0].get("role") == "system" else None
         )
         if system_msg:
             self.messages = [system_msg]
@@ -88,9 +86,7 @@ class Conversation:
 
         if self._session_store is not None:
             try:
-                self._session_store.clear(
-                    keep_system_prompt=self.messages[0].get("content", "")
-                )
+                self._session_store.clear(keep_system_prompt=self.messages[0].get("content", ""))
             except Exception as exc:
                 logger.warning("Session clear failed: %s", exc)
 

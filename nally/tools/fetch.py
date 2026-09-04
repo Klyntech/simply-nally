@@ -26,19 +26,19 @@ logger = logging.getLogger(__name__)
 # SSRF protection — block private / reserved / loopback ranges
 # ---------------------------------------------------------------------------
 _BLOCKED_NETWORKS = [
-    ipaddress.ip_network("127.0.0.0/8"),      # loopback IPv4
-    ipaddress.ip_network("10.0.0.0/8"),       # private class A
-    ipaddress.ip_network("172.16.0.0/12"),    # private class B
-    ipaddress.ip_network("192.168.0.0/16"),   # private class C
-    ipaddress.ip_network("169.254.0.0/16"),   # link-local
-    ipaddress.ip_network("::1/128"),           # loopback IPv6
-    ipaddress.ip_network("fc00::/7"),          # IPv6 private
-    ipaddress.ip_network("fe80::/10"),         # IPv6 link-local
-    ipaddress.ip_network("0.0.0.0/8"),         # "this" network
-    ipaddress.ip_network("192.0.0.0/24"),      # IETF protocol assignments
-    ipaddress.ip_network("192.0.2.0/24"),      # documentation (TEST-NET-1)
-    ipaddress.ip_network("198.51.100.0/24"),   # documentation (TEST-NET-2)
-    ipaddress.ip_network("203.0.113.0/24"),    # documentation (TEST-NET-3)
+    ipaddress.ip_network("127.0.0.0/8"),  # loopback IPv4
+    ipaddress.ip_network("10.0.0.0/8"),  # private class A
+    ipaddress.ip_network("172.16.0.0/12"),  # private class B
+    ipaddress.ip_network("192.168.0.0/16"),  # private class C
+    ipaddress.ip_network("169.254.0.0/16"),  # link-local
+    ipaddress.ip_network("::1/128"),  # loopback IPv6
+    ipaddress.ip_network("fc00::/7"),  # IPv6 private
+    ipaddress.ip_network("fe80::/10"),  # IPv6 link-local
+    ipaddress.ip_network("0.0.0.0/8"),  # "this" network
+    ipaddress.ip_network("192.0.0.0/24"),  # IETF protocol assignments
+    ipaddress.ip_network("192.0.2.0/24"),  # documentation (TEST-NET-1)
+    ipaddress.ip_network("198.51.100.0/24"),  # documentation (TEST-NET-2)
+    ipaddress.ip_network("203.0.113.0/24"),  # documentation (TEST-NET-3)
 ]
 
 
@@ -160,7 +160,9 @@ class Fetch(Tool):
                     if final_ssrf:
                         logger.warning(
                             "Fetch SSRF blocked redirect: %s -> %s — %s",
-                            url[:200], final_url[:200], final_ssrf,
+                            url[:200],
+                            final_url[:200],
+                            final_ssrf,
                         )
                         return f"Error: redirect to blocked address: {final_ssrf}"
 

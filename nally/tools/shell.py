@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 # Default blocklist: destructive commands that should always be rejected.
 _DEFAULT_BLOCKED = [
     re.compile(r"\brm\s+-[a-zA-Z]*r[a-zA-Z]*\s+.*/"),  # rm -rf / or rm -rfr / etc
-    re.compile(r"\bmkfs\b"),           # format filesystem
+    re.compile(r"\bmkfs\b"),  # format filesystem
     re.compile(r"\bdd\s+.*of=/dev/"),  # dd to device
 ]
 

@@ -52,7 +52,7 @@ class GmailProvider(BaseProvider):
         csec = os.getenv("GMAIL_CLIENT_SECRET", "").strip()
         if not cid or not csec:
             raise RuntimeError(
-                "GMAIL_CLIENT_ID and GMAIL_CLIENT_SECRET not set. "
+                "GMAIL_CLIENT_ID and GMAIL_CLIENT_SECRET not configured. "
                 "Create credentials at https://console.cloud.google.com/apis/credentials"
             )
 

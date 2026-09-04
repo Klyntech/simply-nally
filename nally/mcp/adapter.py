@@ -138,29 +138,132 @@ def _inject_user_auth(
     user_id: str | None,
     mcp_user_id: str | None = None,
 ) -> dict[str, Any]:
-    """Inject auth into server config. Per-user via IntegrationManager if user_id, else global.
+    """Inject auth into server config with strict isolation.
 
-    mcp_user_id (Telegram user ID) is tried first for token lookup since tokens
-    are stored keyed by Telegram user ID from the /mcp OAuth flow.
+    Security invariant:
+        user_id != None → ONLY TokenStore(user_id, provider), never global fallback
+        user_id == None → system/CLI credential via environment
+
+    This is the critical security boundary for multi-user SaaS.
     """
     lookup_id = mcp_user_id or user_id
     if lookup_id:
+        # USER-SCOPED: must use per-user credentials only, strict isolation
+        # Query TokenStore directly — never consult environment variables
         try:
-            from nally.integrations import IntegrationManager
+            # Try new canonical TokenStore
+            from nally.oauth.token_store import TokenStore as OAuthTokenStore
 
-            manager = IntegrationManager()
-            headers = manager.get_auth_headers(lookup_id, server_name)
-            if headers:
-                existing = server_cfg.get("headers") or {}
-                return {**server_cfg, "headers": {**existing, **headers}}
-            env_vars = manager.get_auth_env(lookup_id, server_name)
-            if env_vars:
-                existing_env = server_cfg.get("env") or {}
-                return {**server_cfg, "env": {**existing_env, **env_vars}}
-        except Exception:
-            pass
-    # Fallback to global inject_auth
+            store = OAuthTokenStore()
+            token = store.get_valid(lookup_id, server_name)
+            if token:
+                # Format via provider if available, else generic Bearer
+                try:
+                    from nally.oauth.manager import OAuthManager
+                    from nally.oauth.providers.github import GitHubProvider
+                    from nally.oauth.providers.google import GoogleProvider
+                    from nally.oauth.providers.notion import NotionProvider
+
+                    mgr = OAuthManager(token_store=store)
+                    if not mgr._providers:
+                        for p in (GitHubProvider(), GoogleProvider(), NotionProvider()):
+                            mgr.register_provider(p)
+                    headers = mgr.get_auth_headers(lookup_id, server_name)
+                    if headers:
+                        existing = server_cfg.get("headers") or {}
+                        return {**server_cfg, "headers": {**existing, **headers}}
+                    env_vars = mgr.get_auth_env(lookup_id, server_name)
+                    if env_vars:
+                        existing_env = server_cfg.get("env") or {}
+                        return {**server_cfg, "env": {**existing_env, **env_vars}}
+                except Exception:
+                    pass
+                # Fallback formatting if provider not available
+                if server_cfg.get("command"):
+                    # stdio transport
+                    key_map = {
+                        "github": "GITHUB_PERSONAL_ACCESS_TOKEN",
+                        "gmail": "GMAIL_TOKEN",
+                        "notion": "NOTION_TOKEN",
+                    }
+                    k = key_map.get(server_name, f"{server_name.upper()}_TOKEN")
+                    existing_env = server_cfg.get("env") or {}
+                    return {**server_cfg, "env": {**existing_env, k: token.access_token}}
+                else:
+                    existing = server_cfg.get("headers") or {}
+                    return {
+                        **server_cfg,
+                        "headers": {**existing, "Authorization": f"Bearer {token.access_token}"},
+                    }
+        except Exception as exc:
+            logger.debug(
+                "OAuth TokenStore lookup failed for %s/%s: %s", lookup_id, server_name, exc
+            )
+
+        # Try legacy token_store for backward compat (still strict, no env fallback)
+        try:
+            from nally.integrations import token_store as legacy_store
+
+            legacy_token = legacy_store.get_valid_token(lookup_id, server_name)
+            if legacy_token:
+                if server_cfg.get("command"):
+                    key_map = {
+                        "github": "GITHUB_PERSONAL_ACCESS_TOKEN",
+                        "gmail": "GMAIL_TOKEN",
+                        "notion": "NOTION_TOKEN",
+                    }
+                    k = key_map.get(server_name, f"{server_name.upper()}_TOKEN")
+                    existing_env = server_cfg.get("env") or {}
+                    return {**server_cfg, "env": {**existing_env, k: legacy_token}}
+                else:
+                    existing = server_cfg.get("headers") or {}
+                    return {
+                        **server_cfg,
+                        "headers": {**existing, "Authorization": f"Bearer {legacy_token}"},
+                    }
+        except Exception as exc:
+            logger.debug("Legacy token lookup failed for %s/%s: %s", lookup_id, server_name, exc)
+
+        # No user credential found → FAIL CLOSED, do not fallback to global
+        logger.debug(
+            "No credential for user %s provider %s — returning unauthenticated config (AUTH_REQUIRED on use)",
+            lookup_id,
+            server_name,
+        )
+        return dict(server_cfg)
+    # SYSTEM/CLI MODE: no user_id → allow environment credential
     return inject_auth({server_name: server_cfg}).get(server_name, server_cfg)
+
+
+def _has_user_credential(
+    server_name: str,
+    user_id: str | None,
+    mcp_user_id: str | None = None,
+) -> bool:
+    """Check if user has a valid credential for a server.
+
+    Strict check — only TokenStore, no env fallback. Used to fail fast
+    with AUTH_REQUIRED instead of attempting a connection that will fail.
+    """
+    lookup_id = mcp_user_id or user_id
+    if not lookup_id:
+        return True  # CLI mode: no check, allow
+    try:
+        from nally.oauth.token_store import TokenStore as OAuthTokenStore
+
+        store = OAuthTokenStore()
+        if store.is_valid(lookup_id, server_name):
+            return True
+    except Exception:
+        pass
+    try:
+        from nally.integrations import token_store as legacy_store
+
+        if legacy_store.get_valid_token(lookup_id, server_name):
+            return True
+    except Exception:
+        pass
+    return False
 
 
 async def _call_tool_async(
@@ -172,13 +275,21 @@ async def _call_tool_async(
     user_id: str | None = None,
     mcp_user_id: str | None = None,
 ) -> str:
-    """Open a short-lived MCP session and call a tool."""
+    """Open a short-lived MCP session and call a tool.
+
+    For user-scoped requests with no credential, returns AUTH_REQUIRED
+    immediately without attempting a network connection.
+    """
     if not _has_mcp():
         return f"Error: mcp package not installed (server {server_name})"
 
+    lookup_id = mcp_user_id or user_id
+    if lookup_id and not _has_user_credential(server_name, user_id, mcp_user_id):
+        return f"Error: AUTH_REQUIRED: No credential for {server_name}. Please connect via /mcp."
+
     from .client import MCPClient
 
-    # Per-user auth via IntegrationManager, or fallback to global inject_auth
+    # Per-user auth (strict isolation) or system credential
     cfg = _inject_user_auth(server_name, server_cfg, user_id, mcp_user_id=mcp_user_id)
 
     try:
@@ -310,9 +421,12 @@ async def load_mcp_tools(
 ) -> int:
     """Load tools from all configured MCP servers. Returns total count.
 
-    If user_id is provided, uses per-user auth via IntegrationManager.
-    mcp_user_id overrides user_id for MCP token lookup (use Telegram user ID).
-    Otherwise falls back to global auth via inject_auth.
+    Security model:
+        - If user_id/mcp_user_id is provided: ONLY per-user credentials (OAuthManager/TokenStore)
+          No fallback to global/environment credentials. Missing credential → server skipped or AUTH_REQUIRED.
+        - If no user_id: system/CLI mode → global inject_auth allowed (environment credentials)
+
+    mcp_user_id overrides user_id for token lookup (Telegram user ID).
     """
     if config is None:
         try:
@@ -336,11 +450,14 @@ async def load_mcp_tools(
     except Exception:
         deny = set()
 
-    # Inject auth once for all servers (avoids per-server injection overhead)
-    try:
-        config = inject_auth(config)
-    except Exception as exc:
-        logger.warning("MCP auth injection failed: %s", exc)
+    # Inject global auth only for system/CLI mode (no user_id)
+    # For user-scoped requests, per-server injection handles strict isolation
+    lookup_id = mcp_user_id or user_id
+    if not lookup_id:
+        try:
+            config = inject_auth(config)
+        except Exception as exc:
+            logger.warning("MCP auth injection failed: %s", exc)
 
     total = 0
     for server_name, cfg in config.items():

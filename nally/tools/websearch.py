@@ -40,13 +40,16 @@ class SearchResult:
 # ---------------------------------------------------------------------------
 def _ddg_library_search(query: str, num_results: int) -> list[SearchResult] | None:
     """Try DDGS library (new or legacy package name)."""
+
     def _search(q: str, n: int) -> list[dict[str, Any]]:
         try:
             from ddgs import DDGS as _DDGS  # type: ignore
+
             with _DDGS() as ddgs:
                 return list(ddgs.text(q, max_results=n))
         except ImportError:
             from duckduckgo_search import DDGS as _DDGS2  # type: ignore
+
             with _DDGS2() as ddgs:
                 return list(ddgs.text(q, max_results=n))
 

@@ -33,6 +33,8 @@ GITHUB_AUTH_URL = "https://github.com/login/oauth/authorize"
 
 # Legacy global cache path (used by CLI commands)
 LEGACY_CACHE_FILE = os.path.expanduser("~/.config/simply-nally/github_oauth_token.json")
+# Backward compat alias for tests
+TOKEN_CACHE_FILE = LEGACY_CACHE_FILE
 CALLBACK_PORT = 8080
 CALLBACK_URL = f"http://localhost:{CALLBACK_PORT}/callback"
 
@@ -48,10 +50,14 @@ def _read_token_cache() -> dict | None:
 
 
 def _write_token_cache(token: str, expires_at: float) -> None:
-    write_token(_GLOBAL_USER_ID, "github", {
-        "access_token": token,
-        "expires_at": expires_at,
-    })
+    write_token(
+        _GLOBAL_USER_ID,
+        "github",
+        {
+            "access_token": token,
+            "expires_at": expires_at,
+        },
+    )
 
 
 def _token_is_valid() -> bool:
@@ -81,7 +87,15 @@ def clear_github_token() -> bool:
     """Remove cached token. Returns True if removed."""
     from nally.integrations.token_store import clear_token
 
-    return clear_token(_GLOBAL_USER_ID, "github")
+    removed = clear_token(_GLOBAL_USER_ID, "github")
+    # Legacy file path for backward compat with tests
+    try:
+        if os.path.exists(TOKEN_CACHE_FILE):
+            os.remove(TOKEN_CACHE_FILE)
+            removed = True
+    except Exception:
+        pass
+    return removed
 
 
 # ---------------------------------------------------------------------------
@@ -367,9 +381,7 @@ def get_github_token_via_pkce(
     verifier, challenge = _pkce_challenge()
     st = _state()
 
-    device_scopes = (
-        scopes or os.getenv("GITHUB_OAUTH_SCOPES", "repo,read:user,workflow")
-    ).strip()
+    device_scopes = (scopes or os.getenv("GITHUB_OAUTH_SCOPES", "repo,read:user,workflow")).strip()
     params = {
         "client_id": cid,
         "redirect_uri": CALLBACK_URL,
@@ -408,7 +420,9 @@ def get_github_token_via_pkce(
                 raise TimeoutError("GitHub OAuth callback timed out")
     except TimeoutError as exc:
         server.server_close()
-        raise RuntimeError(f"GitHub OAuth timed out after {timeout}s waiting for callback.") from exc
+        raise RuntimeError(
+            f"GitHub OAuth timed out after {timeout}s waiting for callback."
+        ) from exc
     except Exception:
         server.server_close()
         raise
