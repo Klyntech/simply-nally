@@ -3,7 +3,7 @@
 > The smallest reliable agent we can completely understand.
 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/License-MIT-red.svg)](LICENSE)
 
 A minimalist AI agent framework implementing a ReAct (Reason + Act) loop with built-in tools, multi-provider LLM support, and optional integrations. Ground-up rewrite of `N.A.L.L.Y.` — not a fork.
 
