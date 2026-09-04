@@ -74,11 +74,11 @@ class Runtime:
                     system_prompt="",
                     auto_persist=False,
                 )
-            agent = _Agent(conversation=conversation)
+            agent = _Agent(conversation=conversation, telegram_user_id=telegram_user_id)
         except Exception:
             from nally.agent import Agent as _Agent
 
-            agent = _Agent()
+            agent = _Agent(telegram_user_id=telegram_user_id)
 
         # Evict LRU if at capacity
         if len(self._agents) >= self._max_agents:

@@ -133,19 +133,27 @@ def _has_mcp() -> bool:
 
 
 def _inject_user_auth(
-    server_name: str, server_cfg: dict[str, Any], user_id: str | None
+    server_name: str,
+    server_cfg: dict[str, Any],
+    user_id: str | None,
+    mcp_user_id: str | None = None,
 ) -> dict[str, Any]:
-    """Inject auth into server config. Per-user via IntegrationManager if user_id, else global."""
-    if user_id:
+    """Inject auth into server config. Per-user via IntegrationManager if user_id, else global.
+
+    mcp_user_id (Telegram user ID) is tried first for token lookup since tokens
+    are stored keyed by Telegram user ID from the /mcp OAuth flow.
+    """
+    lookup_id = mcp_user_id or user_id
+    if lookup_id:
         try:
             from nally.integrations import IntegrationManager
 
             manager = IntegrationManager()
-            headers = manager.get_auth_headers(user_id, server_name)
+            headers = manager.get_auth_headers(lookup_id, server_name)
             if headers:
                 existing = server_cfg.get("headers") or {}
                 return {**server_cfg, "headers": {**existing, **headers}}
-            env_vars = manager.get_auth_env(user_id, server_name)
+            env_vars = manager.get_auth_env(lookup_id, server_name)
             if env_vars:
                 existing_env = server_cfg.get("env") or {}
                 return {**server_cfg, "env": {**existing_env, **env_vars}}
@@ -162,6 +170,7 @@ async def _call_tool_async(
     arguments: dict[str, Any],
     timeout: float = 30.0,
     user_id: str | None = None,
+    mcp_user_id: str | None = None,
 ) -> str:
     """Open a short-lived MCP session and call a tool."""
     if not _has_mcp():
@@ -170,7 +179,7 @@ async def _call_tool_async(
     from .client import MCPClient
 
     # Per-user auth via IntegrationManager, or fallback to global inject_auth
-    cfg = _inject_user_auth(server_name, server_cfg, user_id)
+    cfg = _inject_user_auth(server_name, server_cfg, user_id, mcp_user_id=mcp_user_id)
 
     try:
         async with MCPClient(cfg, timeout=timeout) as client:
@@ -197,6 +206,7 @@ class MCPTool(Tool):
         server_config: dict[str, Any],
         timeout: float = 30.0,
         user_id: str | None = None,
+        mcp_user_id: str | None = None,
     ) -> None:
         params = _mcp_schema_to_params(input_schema)
         namespaced = f"mcp__{server_name}__{orig_name}"
@@ -210,6 +220,7 @@ class MCPTool(Tool):
         self.server_config = server_config
         self.timeout = timeout
         self.user_id = user_id
+        self.mcp_user_id = mcp_user_id
 
     def execute(self, **kwargs: Any) -> str:  # type: ignore[override]
         try:
@@ -221,6 +232,7 @@ class MCPTool(Tool):
                     kwargs,
                     timeout=self.timeout,
                     user_id=self.user_id,
+                    mcp_user_id=self.mcp_user_id,
                 )
             )
         except Exception as exc:
@@ -234,6 +246,7 @@ async def _load_one_server(
     timeout: float,
     deny: set[str],
     user_id: str | None = None,
+    mcp_user_id: str | None = None,
 ) -> int:
     """List tools from one server and register. Returns count."""
     if not _has_mcp():
@@ -243,7 +256,7 @@ async def _load_one_server(
     from .client import MCPClient
 
     # Per-user auth or fallback to global inject_auth
-    enriched = _inject_user_auth(server_name, cfg, user_id)
+    enriched = _inject_user_auth(server_name, cfg, user_id, mcp_user_id=mcp_user_id)
 
     count = 0
     try:
@@ -265,6 +278,7 @@ async def _load_one_server(
                             server_config=enriched,
                             timeout=timeout,
                             user_id=user_id,
+                            mcp_user_id=mcp_user_id,
                         )
                         registry.register(mcp_tool)
                         count += 1
@@ -292,10 +306,12 @@ async def load_mcp_tools(
     config: dict[str, Any] | None = None,
     timeout: float | None = None,
     user_id: str | None = None,
+    mcp_user_id: str | None = None,
 ) -> int:
     """Load tools from all configured MCP servers. Returns total count.
 
     If user_id is provided, uses per-user auth via IntegrationManager.
+    mcp_user_id overrides user_id for MCP token lookup (use Telegram user ID).
     Otherwise falls back to global auth via inject_auth.
     """
     if config is None:
@@ -332,7 +348,13 @@ async def load_mcp_tools(
             logger.warning("MCP server '%s' config not a dict — skipping", server_name)
             continue
         n = await _load_one_server(
-            registry, server_name, cfg, float(timeout), deny, user_id=user_id
+            registry,
+            server_name,
+            cfg,
+            float(timeout),
+            deny,
+            user_id=user_id,
+            mcp_user_id=mcp_user_id,
         )
         total += n
     return total
@@ -343,6 +365,11 @@ def load_mcp_tools_sync(
     config: dict[str, Any] | None = None,
     timeout: float | None = None,
     user_id: str | None = None,
+    mcp_user_id: str | None = None,
 ) -> int:
     """Sync wrapper for load_mcp_tools."""
-    return _run_async(load_mcp_tools(registry, config=config, timeout=timeout, user_id=user_id))
+    return _run_async(
+        load_mcp_tools(
+            registry, config=config, timeout=timeout, user_id=user_id, mcp_user_id=mcp_user_id
+        )
+    )

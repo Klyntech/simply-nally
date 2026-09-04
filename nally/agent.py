@@ -33,6 +33,7 @@ class Agent:
         max_iterations: int | None = None,
         max_tool_calls: int | None = None,
         on_tool_start: Any | None = None,
+        telegram_user_id: str | None = None,
     ) -> None:
         self.llm: LLMClient = llm_client or default_client
         self.max_iterations = max_iterations if max_iterations is not None else MAX_ITERATIONS
@@ -53,13 +54,17 @@ class Agent:
         if registry is not None:
             self.registry = registry
         else:
-            self.registry = build_default_registry(user_id=user_id)
+            self.registry = build_default_registry(
+                user_id=user_id,
+                mcp_user_id=telegram_user_id,
+            )
 
         # Memory manager for dynamic retrieval (lazy init)
         self._memory_manager: Any | None = None
         if user_id:
             try:
                 from .memory.manager import MemoryManager
+
                 self._memory_manager = MemoryManager(user_id)
             except Exception as exc:
                 logger.debug("MemoryManager init skipped: %s", exc)
@@ -291,8 +296,7 @@ class Agent:
                 tools=None,
             )
             summary = (
-                final.choices[0].message.content
-                or "Tool limit reached. Partial results available."
+                final.choices[0].message.content or "Tool limit reached. Partial results available."
             )
         except Exception as exc:
             logger.warning("Summary call failed: %s", exc)
