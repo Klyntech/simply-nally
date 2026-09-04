@@ -55,7 +55,23 @@ def build_default_registry(
                 if cfg:
                     try:
                         # v2: per-user broker cache (if user scoped) else direct load
+                        # Credentials are stored under the *internal* user UUID (directory).
+                        # Telegram passes raw telegram_id as mcp_user_id — resolve it.
                         lookup = mcp_user_id or user_id
+                        if lookup:
+                            try:
+                                from ..directory import get_directory
+
+                                d = get_directory()
+                                # Prefer telegram mapping when mcp_user_id looks like a telegram id
+                                u = None
+                                if mcp_user_id:
+                                    u = d.get_or_create_for_telegram(telegram_id=str(mcp_user_id))
+                                if u and u.get("id"):
+                                    lookup = u["id"]
+                                    logger.debug("MCP lookup resolved telegram→internal %s", lookup[:8])
+                            except Exception as exc:
+                                logger.debug("Directory resolve for MCP skipped: %s", exc)
                         if lookup:
                             try:
                                 from ..mcp.broker import get_broker

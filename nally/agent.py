@@ -54,9 +54,20 @@ class Agent:
         if registry is not None:
             self.registry = registry
         else:
+            # Prefer internal UUID for MCP vault lookup (credentials keyed by directory id)
+            mcp_id = telegram_user_id
+            if telegram_user_id:
+                try:
+                    from .directory import get_directory
+
+                    u = get_directory().get_or_create_for_telegram(telegram_id=str(telegram_user_id))
+                    if u and u.get("id"):
+                        mcp_id = u["id"]
+                except Exception:
+                    pass
             self.registry = build_default_registry(
-                user_id=user_id,
-                mcp_user_id=telegram_user_id,
+                user_id=user_id or mcp_id,
+                mcp_user_id=mcp_id,
             )
 
         # Memory manager for dynamic retrieval (lazy init)
